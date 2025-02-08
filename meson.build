@@ -379,8 +379,6 @@ add_project_arguments(flags, language: 'c')
 add_project_link_arguments(link_flags, language: ['c', 'objc'])
 
 cpp = meson.get_compiler('cpp')
-add_project_arguments(['-stdlib=libc++'], language : ['cpp'])
-add_project_link_arguments(['-stdlib=libc++'], language : ['cpp'])
 
 # osdep
 cocoa = dependency('appleframeworks', modules: ['Cocoa', 'IOKit', 'QuartzCore'],
