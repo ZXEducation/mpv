@@ -22,14 +22,14 @@ Example script-opts/skip-logo.conf:
             name = "black frame",   -- print if matched
             skip = 10,              -- number of seconds to skip forward
             score = 0.3,            -- required score
-            fingerprint = string.rep("0", 512),
+            fingerprint = "00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
         },
         {
             -- Skip ahead 20 seconds if a white frame was detected
             -- Note: this is dangerous non-sense. It's just for demonstration.
             name = "fun2",
             skip = 20,
-            fingerprint = string.rep("f", 512),
+            fingerprint = "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
         },
     }
 
@@ -70,6 +70,7 @@ frames of a video. This could be fixed, but the author was too lazy to do so.
 
 --]]
 
+local utils = require "mp.utils"
 local msg = require "mp.msg"
 
 local label = "skip-logo"
@@ -120,10 +121,8 @@ end
 local function load_config()
     local conf_file = mp.find_config_file("script-opts/skip-logo.conf")
     local conf_fn
-    local err
+    local err = nil
     if conf_file then
-        -- luacheck: push
-        -- luacheck: ignore setfenv
         if setfenv then
             conf_fn, err = loadfile(conf_file)
             if conf_fn then
@@ -132,13 +131,12 @@ local function load_config()
         else
             conf_fn, err = loadfile(conf_file, "t", config)
         end
-        -- luacheck: pop
     else
         err = "config file not found"
     end
 
     if conf_fn and (not err) then
-        local _, err2 = pcall(conf_fn)
+        local ok, err2 = pcall(conf_fn)
         err = err2
     end
 
@@ -148,7 +146,7 @@ local function load_config()
 
     if config.cases then
         for n, case in ipairs(config.cases) do
-            err = nil
+            local err = nil
             case.bitmap = hex_to_norm8(case.fingerprint)
             if case.bitmap == nil then
                 err = "invalid or missing fingerprint field"
@@ -234,7 +232,7 @@ local function read_frames()
     end
 end
 
-mp.observe_property(meta_property, "native", function()
+mp.observe_property(meta_property, "none", function()
     -- Ignore frames that are decoded/filtered during seeking.
     if seeking then
         return
@@ -243,7 +241,7 @@ mp.observe_property(meta_property, "native", function()
     read_frames()
 end)
 
-mp.observe_property("seeking", "bool", function(_, val)
+mp.observe_property("seeking", "bool", function(name, val)
     seeking = val
     if seeking == false then
         playback_start_pts = mp.get_property_number("playback-time")
@@ -261,7 +259,7 @@ for _, f in ipairs(filters) do
 end
 
 if found then
-    mp.command(("no-osd vf add @%s:fingerprint"):format(label))
+    mp.command(("no-osd vf add @%s:fingerprint"):format(label, filter))
 else
     msg.warn("vf_fingerprint not found")
 end

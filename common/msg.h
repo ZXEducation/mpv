@@ -25,8 +25,6 @@
 
 #include "osdep/compiler.h"
 
-#define TERM_MSG_0 "\xFC"
-
 struct mp_log;
 
 // A mp_log instance that never outputs anything.
@@ -53,8 +51,7 @@ struct mp_log *mp_log_new(void *talloc_ctx, struct mp_log *parent,
 
 void mp_msg(struct mp_log *log, int lev, const char *format, ...)
     PRINTF_ATTRIBUTE(3, 4);
-void mp_msg_va(struct mp_log *log, int lev, const char *format, va_list va)
-    PRINTF_ATTRIBUTE(3, 0);
+void mp_msg_va(struct mp_log *log, int lev, const char *format, va_list va);
 
 int mp_msg_level(struct mp_log *log);
 

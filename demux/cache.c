@@ -20,13 +20,12 @@
 #include <stdlib.h>
 #include <sys/stat.h>
 #include <sys/types.h>
+#include <unistd.h>
 
 #include "cache.h"
 #include "common/msg.h"
 #include "common/av_common.h"
 #include "demux.h"
-#include "demux/packet_pool.h"
-#include "misc/io_utils.h"
 #include "options/path.h"
 #include "options/m_config.h"
 #include "options/m_option.h"
@@ -41,8 +40,8 @@ struct demux_cache_opts {
 
 const struct m_sub_options demux_cache_conf = {
     .opts = (const struct m_option[]){
-        {"demuxer-cache-dir", OPT_STRING(cache_dir), .flags = M_OPT_FILE},
-        {"demuxer-cache-unlink-files", OPT_CHOICE(unlink_files,
+        {"cache-dir", OPT_STRING(cache_dir), .flags = M_OPT_FILE},
+        {"cache-unlink-files", OPT_CHOICE(unlink_files,
             {"immediate", 2}, {"whendone", 1}, {"no", 0}),
         },
         {0}
@@ -51,12 +50,10 @@ const struct m_sub_options demux_cache_conf = {
     .defaults = &(const struct demux_cache_opts){
         .unlink_files = 2,
     },
-    .change_flags = UPDATE_DEMUXER,
 };
 
 struct demux_cache {
     struct mp_log *log;
-    struct demux_packet_pool *packet_pool;
     struct demux_cache_opts *opts;
 
     char *filename;
@@ -100,7 +97,6 @@ struct demux_cache *demux_cache_create(struct mpv_global *global,
     talloc_set_destructor(cache, cache_destroy);
     cache->opts = mp_get_config_group(cache, global, &demux_cache_conf);
     cache->log = log;
-    cache->packet_pool = demux_packet_pool_get(global);
     cache->fd = -1;
 
     char *cache_dir = cache->opts->cache_dir;
@@ -216,7 +212,7 @@ int64_t demux_cache_write(struct demux_cache *cache, struct demux_packet *dp)
     }
 
     assert(!dp->is_cached);
-    assert(dp->len <= INT32_MAX);
+    assert(dp->len >= 0 && dp->len <= INT32_MAX);
     assert(dp->avpacket->flags >= 0 && dp->avpacket->flags <= INT32_MAX);
     assert(dp->avpacket->side_data_elems >= 0 &&
            dp->avpacket->side_data_elems <= INT32_MAX);
@@ -262,7 +258,7 @@ int64_t demux_cache_write(struct demux_cache *cache, struct demux_packet *dp)
     for (int n = 0; n < dp->avpacket->side_data_elems; n++) {
         AVPacketSideData *sd = &dp->avpacket->side_data[n];
 
-        assert(sd->size <= INT32_MAX);
+        assert(sd->size >= 0 && sd->size <= INT32_MAX);
         assert(sd->type >= 0 && sd->type <= INT32_MAX);
 
         struct sd_header sd_hd = {
@@ -295,7 +291,10 @@ struct demux_packet *demux_cache_read(struct demux_cache *cache, uint64_t pos)
     if (!read_raw(cache, &hd, sizeof(hd)))
         return NULL;
 
-    struct demux_packet *dp = new_demux_packet(cache->packet_pool, hd.data_len);
+    if (hd.data_len >= (size_t)-1)
+        return NULL;
+
+    struct demux_packet *dp = new_demux_packet(hd.data_len);
     if (!dp)
         goto fail;
 

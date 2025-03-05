@@ -13,7 +13,6 @@
 #include "osdep/windows_utils.h"
 #include "video/out/gpu/spirv.h"
 #include "video/out/gpu/utils.h"
-#include "video/out/gpu/d3d11_helpers.h"
 
 #include "ra_d3d11.h"
 
@@ -45,8 +44,8 @@ struct ra_d3d11 {
     struct dll_version d3d_compiler_ver;
 
     // Debug interfaces (--gpu-debug)
-    IDXGIDebug *debug;
-    IDXGIInfoQueue *iqueue;
+    ID3D11Debug *debug;
+    ID3D11InfoQueue *iqueue;
 
     // Device capabilities
     D3D_FEATURE_LEVEL fl;
@@ -1323,13 +1322,13 @@ static bool compile_glsl(struct ra *ra, enum glsl_shader type,
         sc_shader_model = 40;
     }
 
-    int64_t start_ns = mp_time_ns();
+    int64_t start_us = mp_time_us();
 
     bstr spv_module;
     if (!spirv->fns->compile_glsl(spirv, ta_ctx, type, glsl, &spv_module))
         goto done;
 
-    int64_t shaderc_ns = mp_time_ns();
+    int64_t shaderc_us = mp_time_us();
 
     sc_res = spvc_context_create(&sc_ctx);
     if (sc_res != SPVC_SUCCESS)
@@ -1368,7 +1367,7 @@ static bool compile_glsl(struct ra *ra, enum glsl_shader type,
     if (sc_res != SPVC_SUCCESS)
         goto done;
 
-    int64_t cross_ns = mp_time_ns();
+    int64_t cross_us = mp_time_us();
 
     hr = p->D3DCompile(hlsl, strlen(hlsl), NULL, NULL, NULL, "main",
         get_shader_target(ra, type), D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, out,
@@ -1380,14 +1379,14 @@ static bool compile_glsl(struct ra *ra, enum glsl_shader type,
         goto done;
     }
 
-    int64_t d3dcompile_ns = mp_time_ns();
+    int64_t d3dcompile_us = mp_time_us();
 
-    MP_VERBOSE(ra, "Compiled a %s shader in %lldns\n", shader_type_name(type),
-               d3dcompile_ns - start_ns);
-    MP_VERBOSE(ra, "shaderc: %lldns, SPIRV-Cross: %lldns, D3DCompile: %lldns\n",
-               shaderc_ns - start_ns,
-               cross_ns - shaderc_ns,
-               d3dcompile_ns - cross_ns);
+    MP_VERBOSE(ra, "Compiled a %s shader in %lldus\n", shader_type_name(type),
+               d3dcompile_us - start_us);
+    MP_VERBOSE(ra, "shaderc: %lldus, SPIRV-Cross: %lldus, D3DCompile: %lldus\n",
+               shaderc_us - start_us,
+               cross_us - shaderc_us,
+               d3dcompile_us - cross_us);
 
     success = true;
 done:
@@ -1501,21 +1500,21 @@ static size_t vbuf_upload(struct ra *ra, void *data, size_t size)
 }
 
 static const char cache_magic[4] = "RD11";
-static const uint32_t cache_version = 4;
+static const int cache_version = 3;
 
 struct cache_header {
     char magic[sizeof(cache_magic)];
-    uint32_t cache_version;
+    int cache_version;
     char compiler[SPIRV_NAME_MAX_LEN];
-    int32_t spv_compiler_version;
-    uint32_t spvc_compiler_major;
-    uint32_t spvc_compiler_minor;
-    uint32_t spvc_compiler_patch;
+    int spv_compiler_version;
+    unsigned spvc_compiler_major;
+    unsigned spvc_compiler_minor;
+    unsigned spvc_compiler_patch;
     struct dll_version d3d_compiler_version;
-    int32_t feature_level;
-    uint32_t vert_bytecode_len;
-    uint32_t frag_bytecode_len;
-    uint32_t comp_bytecode_len;
+    int feature_level;
+    size_t vert_bytecode_len;
+    size_t frag_bytecode_len;
+    size_t comp_bytecode_len;
 };
 
 static void load_cached_program(struct ra *ra,
@@ -1599,7 +1598,7 @@ static void save_cached_program(struct ra *ra, struct ra_renderpass *pass,
         .comp_bytecode_len = comp_bc.len,
     };
     memcpy(header.magic, cache_magic, sizeof(header.magic));
-    strncpy(header.compiler, spirv->name, sizeof(header.compiler));
+    strncpy(header.compiler, spirv->name, sizeof(header.compiler) - 1);
 
     struct bstr *prog = &pass->params.cached_program;
     bstr_xappend(pass, prog, (bstr){ (char *) &header, sizeof(header) });
@@ -1931,7 +1930,7 @@ static void renderpass_run(struct ra *ra,
         int binding = pass->params.inputs[val->index].binding;
         switch (pass->params.inputs[val->index].type) {
         case RA_VARTYPE_BUF_RO:
-            if (binding >= MP_ARRAY_SIZE(ubos)) {
+            if (binding > MP_ARRAY_SIZE(ubos)) {
                 MP_ERR(ra, "Too many constant buffers in pass\n");
                 return;
             }
@@ -1953,7 +1952,7 @@ static void renderpass_run(struct ra *ra,
             uavs_len = MPMAX(uavs_len, binding + 1);
             break;
         case RA_VARTYPE_TEX:
-            if (binding >= MP_ARRAY_SIZE(samplers)) {
+            if (binding > MP_ARRAY_SIZE(samplers)) {
                 MP_ERR(ra, "Too many textures in pass\n");
                 return;
             }
@@ -2095,24 +2094,24 @@ static uint64_t timer_stop(struct ra *ra, ra_timer *ratimer)
     return timer->result;
 }
 
-static int map_msg_severity(DXGI_INFO_QUEUE_MESSAGE_SEVERITY sev)
+static int map_msg_severity(D3D11_MESSAGE_SEVERITY sev)
 {
     switch (sev) {
-    case DXGI_INFO_QUEUE_MESSAGE_SEVERITY_CORRUPTION:
+    case D3D11_MESSAGE_SEVERITY_CORRUPTION:
         return MSGL_FATAL;
-    case DXGI_INFO_QUEUE_MESSAGE_SEVERITY_ERROR:
+    case D3D11_MESSAGE_SEVERITY_ERROR:
         return MSGL_ERR;
-    case DXGI_INFO_QUEUE_MESSAGE_SEVERITY_WARNING:
+    case D3D11_MESSAGE_SEVERITY_WARNING:
         return MSGL_WARN;
     default:
-    case DXGI_INFO_QUEUE_MESSAGE_SEVERITY_INFO:
-    case DXGI_INFO_QUEUE_MESSAGE_SEVERITY_MESSAGE:
+    case D3D11_MESSAGE_SEVERITY_INFO:
+    case D3D11_MESSAGE_SEVERITY_MESSAGE:
         return MSGL_DEBUG;
     }
 }
 
 static int map_msg_severity_by_id(D3D11_MESSAGE_ID id,
-                                  DXGI_INFO_QUEUE_MESSAGE_SEVERITY sev)
+                                  D3D11_MESSAGE_SEVERITY sev)
 {
     switch (id) {
     // These are normal. The RA timer queue habitually reuses timer objects
@@ -2181,35 +2180,31 @@ static void debug_marker(struct ra *ra, const char *msg)
 
     // Copy debug-layer messages to mpv's log output
     bool printed_header = false;
-    uint64_t messages = IDXGIInfoQueue_GetNumStoredMessages(p->iqueue,
-                                                            DXGI_DEBUG_ALL);
+    uint64_t messages = ID3D11InfoQueue_GetNumStoredMessages(p->iqueue);
     for (uint64_t i = 0; i < messages; i++) {
         SIZE_T len;
-        hr = IDXGIInfoQueue_GetMessage(p->iqueue, DXGI_DEBUG_ALL, i, NULL, &len);
+        hr = ID3D11InfoQueue_GetMessage(p->iqueue, i, NULL, &len);
         if (FAILED(hr) || !len)
             goto done;
 
-        DXGI_INFO_QUEUE_MESSAGE *dxgimsg = talloc_size(talloc_ctx, len);
-        hr = IDXGIInfoQueue_GetMessage(p->iqueue, DXGI_DEBUG_ALL, i, dxgimsg, &len);
+        D3D11_MESSAGE *d3dmsg = talloc_size(talloc_ctx, len);
+        hr = ID3D11InfoQueue_GetMessage(p->iqueue, i, d3dmsg, &len);
         if (FAILED(hr))
             goto done;
 
-        int msgl = IsEqualGUID(&dxgimsg->Producer, &DXGI_DEBUG_D3D11)
-                        ? map_msg_severity_by_id(dxgimsg->ID, dxgimsg->Severity)
-                        : map_msg_severity(dxgimsg->Severity);
-
+        int msgl = map_msg_severity_by_id(d3dmsg->ID, d3dmsg->Severity);
         if (mp_msg_test(ra->log, msgl)) {
             if (!printed_header)
                 MP_INFO(ra, "%s:\n", msg);
             printed_header = true;
 
-            MP_MSG(ra, msgl, "%d: %.*s\n", (int)dxgimsg->ID,
-                (int)dxgimsg->DescriptionByteLength, dxgimsg->pDescription);
-            talloc_free(dxgimsg);
+            MP_MSG(ra, msgl, "%d: %.*s\n", (int)d3dmsg->ID,
+                (int)d3dmsg->DescriptionByteLength, d3dmsg->pDescription);
+            talloc_free(d3dmsg);
         }
     }
 
-    IDXGIInfoQueue_ClearStoredMessages(p->iqueue, DXGI_DEBUG_ALL);
+    ID3D11InfoQueue_ClearStoredMessages(p->iqueue);
 done:
     talloc_free(talloc_ctx);
 }
@@ -2245,9 +2240,9 @@ static void destroy(struct ra *ra)
     if (p->debug) {
         // Report any leaked objects
         debug_marker(ra, "after destroy");
-        IDXGIDebug_ReportLiveObjects(p->debug, DXGI_DEBUG_ALL, DXGI_DEBUG_RLO_DETAIL);
+        ID3D11Debug_ReportLiveDeviceObjects(p->debug, D3D11_RLDO_DETAIL);
         debug_marker(ra, "after leak check");
-        IDXGIDebug_ReportLiveObjects(p->debug, DXGI_DEBUG_ALL, DXGI_DEBUG_RLO_SUMMARY);
+        ID3D11Debug_ReportLiveDeviceObjects(p->debug, D3D11_RLDO_SUMMARY);
         debug_marker(ra, "after leak summary");
     }
     SAFE_RELEASE(p->debug);
@@ -2283,6 +2278,34 @@ void ra_d3d11_flush(struct ra *ra)
 {
     struct ra_d3d11 *p = ra->priv;
     ID3D11DeviceContext_Flush(p->ctx);
+}
+
+static void init_debug_layer(struct ra *ra)
+{
+    struct ra_d3d11 *p = ra->priv;
+    HRESULT hr;
+
+    hr = ID3D11Device_QueryInterface(p->dev, &IID_ID3D11Debug,
+                                     (void**)&p->debug);
+    if (FAILED(hr)) {
+        MP_ERR(ra, "Failed to get debug device: %s\n", mp_HRESULT_to_str(hr));
+        return;
+    }
+
+    hr = ID3D11Device_QueryInterface(p->dev, &IID_ID3D11InfoQueue,
+                                     (void**)&p->iqueue);
+    if (FAILED(hr)) {
+        MP_ERR(ra, "Failed to get info queue: %s\n", mp_HRESULT_to_str(hr));
+        return;
+    }
+
+    // Store an unlimited amount of messages in the buffer. This is fine
+    // because we flush stored messages regularly (in debug_marker.)
+    ID3D11InfoQueue_SetMessageCountLimit(p->iqueue, -1);
+
+    // Push empty filter to get everything
+    D3D11_INFO_QUEUE_FILTER filter = {0};
+    ID3D11InfoQueue_PushStorageFilter(p->iqueue, &filter);
 }
 
 static struct dll_version get_dll_version(HMODULE dll)
@@ -2444,7 +2467,7 @@ struct ra *ra_d3d11_create(ID3D11Device *dev, struct mp_log *log,
     }
 
     if (ID3D11Device_GetCreationFlags(p->dev) & D3D11_CREATE_DEVICE_DEBUG)
-        mp_d3d11_get_debug_interfaces(ra->log, &p->debug, &p->iqueue);
+        init_debug_layer(ra);
 
     // Some level 9_x devices don't have timestamp queries
     hr = ID3D11Device_CreateQuery(p->dev,
@@ -2460,7 +2483,7 @@ struct ra *ra_d3d11_create(ID3D11Device *dev, struct mp_log *log,
 
     // Ignore any messages during find_max_texture_dimension
     if (p->iqueue)
-        IDXGIInfoQueue_ClearStoredMessages(p->iqueue, DXGI_DEBUG_ALL);
+        ID3D11InfoQueue_ClearStoredMessages(p->iqueue);
 
     MP_VERBOSE(ra, "Maximum Texture2D size: %dx%d\n", ra->max_texture_wh,
                ra->max_texture_wh);

@@ -15,28 +15,29 @@
  * License along with mpv.  If not, see <http://www.gnu.org/licenses/>.
  */
 
-#include <assert.h>
-#include <errno.h>
-#include <stdatomic.h>
-#include <stdbool.h>
-#include <stdio.h>
 #include <stdlib.h>
+#include <stdio.h>
+#include <errno.h>
 #include <string.h>
+#include <strings.h>
+#include <assert.h>
+#include <stdbool.h>
+#include <pthread.h>
 
+#include "m_config_core.h"
+#include "options/m_option.h"
 #include "common/common.h"
 #include "common/global.h"
-#include "common/msg_control.h"
 #include "common/msg.h"
-#include "m_config_core.h"
+#include "common/msg_control.h"
 #include "misc/dispatch.h"
-#include "options/m_option.h"
-#include "osdep/threads.h"
+#include "osdep/atomic.h"
 
 // For use with m_config_cache.
 struct m_config_shadow {
-    mp_mutex lock;
+    pthread_mutex_t lock;
     // Incremented on every option change.
-    _Atomic uint64_t ts;
+    mp_atomic_uint64 ts;
     // -- immutable after init
     // List of m_sub_options instances.
     // Index 0 is the top-level and is always present.
@@ -98,18 +99,13 @@ struct config_cache {
     void *wakeup_cb_ctx;
 };
 
-struct force_update {
-    char *name;
-    uint64_t ts;
-};
-
 // Per m_config_data state for each m_config_group.
 struct m_group_data {
-    char *udata;                        // pointer to group user option struct
-    uint64_t ts;                        // timestamp of the data copy
-    struct force_update **force_update; // tracks opts that are written with force update
-    int force_update_len;
+    char *udata;        // pointer to group user option struct
+    uint64_t ts;        // timestamp of the data copy
 };
+
+static const union m_option_value default_value = {0};
 
 static void add_sub_group(struct m_config_shadow *shadow, const char *name_prefix,
                           int parent_group_index, int parent_ptr,
@@ -227,19 +223,6 @@ const char *m_config_shadow_get_opt_name(struct m_config_shadow *shadow,
                            g->group->opts[opt_index].name);
 }
 
-const char *m_config_shadow_get_alias_from_opt(struct m_config_shadow *shadow, int32_t id,
-                                               char *buf, size_t buf_size)
-{
-    int group_index, opt_index;
-    get_opt_from_id(shadow, id, &group_index, &opt_index);
-
-    struct m_config_group *g = &shadow->groups[group_index];
-    const struct m_option *opt = &shadow->groups[group_index].group->opts[opt_index];
-    if (opt->alias_use_prefix)
-        return concat_name_buf(buf, buf_size, g->prefix, (const char *)opt->priv);
-    return (const char *)opt->priv;
-}
-
 const void *m_config_shadow_get_opt_default(struct m_config_shadow *shadow,
                                             int32_t id)
 {
@@ -258,7 +241,7 @@ const void *m_config_shadow_get_opt_default(struct m_config_shadow *shadow,
     if (subopt->defaults)
         return (char *)subopt->defaults + opt->offset;
 
-    return &m_option_value_default;
+    return &default_value;
 }
 
 void *m_config_cache_get_opt_data(struct m_config_cache *cache, int32_t id)
@@ -436,14 +419,14 @@ static void shadow_destroy(void *p)
     assert(shadow->num_listeners == 0);
 
     talloc_free(shadow->data);
-    mp_mutex_destroy(&shadow->lock);
+    pthread_mutex_destroy(&shadow->lock);
 }
 
 struct m_config_shadow *m_config_shadow_new(const struct m_sub_options *root)
 {
     struct m_config_shadow *shadow = talloc_zero(NULL, struct m_config_shadow);
     talloc_set_destructor(shadow, shadow_destroy);
-    mp_mutex_init(&shadow->lock);
+    pthread_mutex_init(&shadow->lock, NULL);
 
     add_sub_group(shadow, NULL, -1, -1, root);
 
@@ -496,7 +479,7 @@ static void add_sub_group(struct m_config_shadow *shadow, const char *name_prefi
     }
 
     // You can only use UPDATE_ flags here.
-    assert(!(subopts->change_flags & ~UPDATE_OPTS_MASK));
+    assert(!(subopts->change_flags & ~(unsigned)UPDATE_OPTS_MASK));
 
     assert(parent_group_index >= -1 && parent_group_index < shadow->num_groups);
 
@@ -585,9 +568,9 @@ struct m_config_cache *m_config_cache_from_shadow(void *ta_parent,
     in->shadow = shadow;
     in->src = shadow->data;
 
-    mp_mutex_lock(&shadow->lock);
+    pthread_mutex_lock(&shadow->lock);
     in->data = allocate_option_data(cache, shadow, group_index, in->src);
-    mp_mutex_unlock(&shadow->lock);
+    pthread_mutex_unlock(&shadow->lock);
 
     cache->opts = in->data->gdata[0].udata;
 
@@ -605,34 +588,6 @@ struct m_config_cache *m_config_cache_alloc(void *ta_parent,
                                             const struct m_sub_options *group)
 {
     return m_config_cache_from_shadow(ta_parent, global->config, group);
-}
-
-static void append_force_update(struct m_config_cache *cache, struct m_group_data *gdata,
-                                const char *opt_name)
-{
-    for (int i = 0; i < gdata->force_update_len; ++i) {
-        if (strcmp(opt_name, gdata->force_update[i]->name) == 0) {
-            gdata->force_update[i]->ts = gdata->ts;
-            return;
-        }
-    }
-    struct force_update *new_update = talloc_zero(cache, struct force_update);
-    new_update->name = talloc_strdup(cache, opt_name);
-    new_update->ts = gdata->ts;
-    MP_TARRAY_APPEND(cache, gdata->force_update, gdata->force_update_len, new_update);
-}
-
-static bool check_force_update(struct m_group_data *gdata, const char *opt_name,
-                               uint64_t timestamp)
-{
-    for (int i = 0; i < gdata->force_update_len; ++i) {
-        if ((strcmp(opt_name, gdata->force_update[i]->name) == 0) &&
-            gdata->force_update[i]->ts == timestamp)
-        {
-            return true;
-        }
-    }
-    return false;
 }
 
 static void update_next_option(struct m_config_cache *cache, void **p_opt)
@@ -656,18 +611,16 @@ static void update_next_option(struct m_config_cache *cache, void **p_opt)
 
             while (opts && opts[in->upd_opt].name) {
                 const struct m_option *opt = &opts[in->upd_opt];
-                void *dsrc = gsrc->udata + opt->offset;
-                void *ddst = gdst->udata + opt->offset;
 
                 if (opt->offset >= 0 && opt->type->size) {
-                    bool opt_equal = m_option_equal(opt, ddst, dsrc);
-                    bool force_update = opt->force_update &&
-                                        check_force_update(gsrc, opt->name, in->ts);
-                    if (!opt_equal || force_update) {
+                    void *dsrc = gsrc->udata + opt->offset;
+                    void *ddst = gdst->udata + opt->offset;
+
+                    if (!m_option_equal(opt, ddst, dsrc)) {
                         uint64_t ch = get_opt_change_mask(dst->shadow,
                                         in->upd_group, dst->group_index, opt);
 
-                        if (cache->debug && !opt_equal) {
+                        if (cache->debug) {
                             char *vdst = m_option_print(opt, ddst);
                             char *vsrc = m_option_print(opt, dsrc);
                             mp_warn(cache->debug, "Option '%s' changed from "
@@ -724,7 +677,7 @@ bool m_config_cache_update(struct m_config_cache *cache)
     if (!cache_check_update(cache))
         return false;
 
-    mp_mutex_lock(&shadow->lock);
+    pthread_mutex_lock(&shadow->lock);
     bool res = false;
     while (1) {
         void *p;
@@ -733,7 +686,7 @@ bool m_config_cache_update(struct m_config_cache *cache)
             break;
         res = true;
     }
-    mp_mutex_unlock(&shadow->lock);
+    pthread_mutex_unlock(&shadow->lock);
     return res;
 }
 
@@ -746,9 +699,9 @@ bool m_config_cache_get_next_changed(struct m_config_cache *cache, void **opt)
     if (!cache_check_update(cache) && in->upd_group < 0)
         return false;
 
-    mp_mutex_lock(&shadow->lock);
+    pthread_mutex_lock(&shadow->lock);
     update_next_option(cache, opt);
-    mp_mutex_unlock(&shadow->lock);
+    pthread_mutex_unlock(&shadow->lock);
     return !!*opt;
 }
 
@@ -793,14 +746,13 @@ bool m_config_cache_write_opt(struct m_config_cache *cache, void *ptr)
     struct m_config_group *g = &shadow->groups[group_idx];
     const struct m_option *opt = &g->group->opts[opt_idx];
 
-    mp_mutex_lock(&shadow->lock);
+    pthread_mutex_lock(&shadow->lock);
 
     struct m_group_data *gdst = m_config_gdata(in->data, group_idx);
     struct m_group_data *gsrc = m_config_gdata(in->src, group_idx);
     assert(gdst && gsrc);
 
-    bool changed = !m_option_equal(opt, gsrc->udata + opt->offset, ptr) ||
-                   opt->force_update;
+    bool changed = !m_option_equal(opt, gsrc->udata + opt->offset, ptr);
     if (changed) {
         m_option_copy(opt, gsrc->udata + opt->offset, ptr);
 
@@ -813,10 +765,7 @@ bool m_config_cache_write_opt(struct m_config_cache *cache, void *ptr)
         }
     }
 
-    if (opt->force_update)
-        append_force_update(cache, gsrc, opt->name);
-
-    mp_mutex_unlock(&shadow->lock);
+    pthread_mutex_unlock(&shadow->lock);
 
     return changed;
 }
@@ -827,7 +776,7 @@ void m_config_cache_set_wakeup_cb(struct m_config_cache *cache,
     struct config_cache *in = cache->internal;
     struct m_config_shadow *shadow = in->shadow;
 
-    mp_mutex_lock(&shadow->lock);
+    pthread_mutex_lock(&shadow->lock);
     if (in->in_list) {
         for (int n = 0; n < shadow->num_listeners; n++) {
             if (shadow->listeners[n] == in) {
@@ -849,7 +798,7 @@ void m_config_cache_set_wakeup_cb(struct m_config_cache *cache,
         in->wakeup_cb = cb;
         in->wakeup_cb_ctx = cb_ctx;
     }
-    mp_mutex_unlock(&shadow->lock);
+    pthread_mutex_unlock(&shadow->lock);
 }
 
 static void dispatch_notify(void *p)
@@ -899,6 +848,38 @@ void *mp_get_config_group(void *ta_parent, struct mpv_global *global,
     ta_set_parent(cache->opts, ta_parent);
     ta_set_parent(cache, cache->opts);
     return cache->opts;
+}
+
+void mp_read_option_raw(struct mpv_global *global, const char *name,
+                        const struct m_option_type *type, void *dst)
+{
+    struct m_config_shadow *shadow = global->config;
+
+    int32_t optid = -1;
+    while (m_config_shadow_get_next_opt(shadow, &optid)) {
+        char buf[M_CONFIG_MAX_OPT_NAME_LEN];
+        const char *opt_name =
+            m_config_shadow_get_opt_name(shadow, optid, buf, sizeof(buf));
+
+        if (strcmp(name, opt_name) == 0) {
+            const struct m_option *opt = m_config_shadow_get_opt(shadow, optid);
+
+            int group_index, opt_index;
+            get_opt_from_id(shadow, optid, &group_index, &opt_index);
+
+            struct m_group_data *gdata = m_config_gdata(shadow->data, group_index);
+            assert(gdata);
+
+            assert(opt->offset >= 0);
+            assert(opt->type == type);
+
+            memset(dst, 0, opt->type->size);
+            m_option_copy(opt, dst, gdata->udata + opt->offset);
+            return;
+        }
+    }
+
+    MP_ASSERT_UNREACHABLE(); // not found
 }
 
 static const struct m_config_group *find_group(struct mpv_global *global,

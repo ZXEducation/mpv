@@ -22,6 +22,7 @@
 #ifndef MPLAYER_ENCODE_LAVC_H
 #define MPLAYER_ENCODE_LAVC_H
 
+#include <pthread.h>
 
 #include <libavcodec/avcodec.h>
 #include <libavformat/avformat.h>
@@ -32,7 +33,6 @@
 
 #include "common/common.h"
 #include "encode.h"
-#include "osdep/threads.h"
 #include "video/csputils.h"
 
 struct encode_lavc_context {
@@ -47,7 +47,7 @@ struct encode_lavc_context {
     // All entry points must be guarded with the lock. Functions called by
     // the playback core lock this automatically, but ao_lavc.c and vo_lavc.c
     // must lock manually before accessing state.
-    mp_mutex lock;
+    pthread_mutex_t lock;
 
     // anti discontinuity mode
     double next_in_pts;
@@ -111,6 +111,6 @@ bool encoder_encode(struct encoder_context *p, AVFrame *frame);
 // Caller needs to acquire encode_lavc_context.lock (or call it from on_ready).
 AVRational encoder_get_mux_timebase_unlocked(struct encoder_context *p);
 
-void encoder_update_log(struct mpv_global *global);
+double encoder_get_offset(struct encoder_context *p);
 
 #endif

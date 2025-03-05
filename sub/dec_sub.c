@@ -20,10 +20,9 @@
 #include <string.h>
 #include <math.h>
 #include <assert.h>
-#include <limits.h>
+#include <pthread.h>
 
 #include "demux/demux.h"
-#include "demux/packet_pool.h"
 #include "sd.h"
 #include "dec_sub.h"
 #include "options/m_config.h"
@@ -44,15 +43,12 @@ static const struct sd_functions *const sd_list[] = {
 };
 
 struct dec_sub {
-    mp_mutex lock;
+    pthread_mutex_t lock;
 
     struct mp_log *log;
     struct mpv_global *global;
-    struct demux_packet_pool *packet_pool;
     struct mp_subtitle_opts *opts;
-    struct mp_subtitle_shared_opts *shared_opts;
     struct m_config_cache *opts_cache;
-    struct m_config_cache *shared_opts_cache;
 
     struct mp_recorder_sink *recorder_sink;
 
@@ -65,7 +61,6 @@ struct dec_sub {
     bool preload_attempted;
     double video_fps;
     double sub_speed;
-    bool sub_visible;
 
     struct mp_codec_params *codec;
     double start, end;
@@ -74,9 +69,8 @@ struct dec_sub {
     struct sd *sd;
 
     struct demux_packet *new_segment;
-    struct demux_packet **cached_pkts;
-    int cached_pkt_pos;
-    int num_cached_pkts;
+
+    bool forced_only_def;
 };
 
 static void update_subtitle_speed(struct dec_sub *sub)
@@ -99,22 +93,20 @@ static void update_subtitle_speed(struct dec_sub *sub)
 // Return the subtitle PTS used for a given video PTS.
 static double pts_to_subtitle(struct dec_sub *sub, double pts)
 {
-    struct mp_subtitle_shared_opts *opts = sub->shared_opts;
-    float delay = sub->order < 0 ? 0.0f : opts->sub_delay[sub->order];
+    struct mp_subtitle_opts *opts = sub->opts;
 
     if (pts != MP_NOPTS_VALUE)
-        pts = (pts * sub->play_dir - delay) / sub->sub_speed;
+        pts = (pts * sub->play_dir - opts->sub_delay) / sub->sub_speed;
 
     return pts;
 }
 
 static double pts_from_subtitle(struct dec_sub *sub, double pts)
 {
-    struct mp_subtitle_shared_opts *opts = sub->shared_opts;
-    float delay = sub->order < 0 ? 0.0f : opts->sub_delay[sub->order];
+    struct mp_subtitle_opts *opts = sub->opts;
 
     if (pts != MP_NOPTS_VALUE)
-        pts = (pts * sub->sub_speed + delay) * sub->play_dir;
+        pts = (pts * sub->sub_speed + opts->sub_delay) * sub->play_dir;
 
     return pts;
 }
@@ -123,18 +115,6 @@ static void wakeup_demux(void *ctx)
 {
     struct mp_dispatch_queue *q = ctx;
     mp_dispatch_interrupt(q);
-}
-
-static void destroy_cached_pkts(struct dec_sub *sub)
-{
-    int index = 0;
-    while (index < sub->num_cached_pkts) {
-        demux_packet_pool_push(sub->packet_pool, sub->cached_pkts[index]);
-        sub->cached_pkts[index] = NULL;
-        ++index;
-    }
-    sub->cached_pkt_pos = 0;
-    sub->num_cached_pkts = 0;
 }
 
 void sub_destroy(struct dec_sub *sub)
@@ -147,7 +127,7 @@ void sub_destroy(struct dec_sub *sub)
         sub->sd->driver->uninit(sub->sd);
     }
     talloc_free(sub->sd);
-    mp_mutex_destroy(&sub->lock);
+    pthread_mutex_destroy(&sub->lock);
     talloc_free(sub);
 }
 
@@ -160,12 +140,11 @@ static struct sd *init_decoder(struct dec_sub *sub)
             .global = sub->global,
             .log = mp_log_new(sd, sub->log, driver->name),
             .opts = sub->opts,
-            .shared_opts = sub->shared_opts,
             .driver = driver,
-            .order = sub->order,
             .attachments = sub->attachments,
             .codec = sub->codec,
             .preload_ok = true,
+            .forced_only_def = sub->forced_only_def,
         };
 
         if (sd->driver->init(sd) >= 0)
@@ -193,9 +172,7 @@ struct dec_sub *sub_create(struct mpv_global *global, struct track *track,
     *sub = (struct dec_sub){
         .log = mp_log_new(sub, global->log, "sub"),
         .global = global,
-        .packet_pool = demux_packet_pool_get(global),
         .opts_cache = m_config_cache_alloc(sub, global, &mp_subtitle_sub_opts),
-        .shared_opts_cache = m_config_cache_alloc(sub, global, &mp_subtitle_shared_sub_opts),
         .sh = track->stream,
         .codec = track->stream->codec,
         .attachments = talloc_steal(sub, attachments),
@@ -205,10 +182,10 @@ struct dec_sub *sub_create(struct mpv_global *global, struct track *track,
         .last_vo_pts = MP_NOPTS_VALUE,
         .start = MP_NOPTS_VALUE,
         .end = MP_NOPTS_VALUE,
+        .forced_only_def = track->forced_only_def,
     };
     sub->opts = sub->opts_cache->opts;
-    sub->shared_opts = sub->shared_opts_cache->opts;
-    mp_mutex_init(&sub->lock);
+    mpthread_mutex_init_recursive(&sub->lock);
 
     sub->sd = init_decoder(sub);
     if (sub->sd) {
@@ -238,6 +215,7 @@ static void update_segment(struct dec_sub *sub)
             talloc_free(sub->sd);
             sub->sd = new;
             update_subtitle_speed(sub);
+            sub_control(sub, SD_CTRL_SET_TOP, &sub->order);
         } else {
             // We'll just keep the current decoder, and feed it possibly
             // invalid data (not our fault if it crashes or something).
@@ -252,15 +230,15 @@ static void update_segment(struct dec_sub *sub)
 bool sub_can_preload(struct dec_sub *sub)
 {
     bool r;
-    mp_mutex_lock(&sub->lock);
+    pthread_mutex_lock(&sub->lock);
     r = sub->sd->driver->accept_packets_in_advance && !sub->preload_attempted;
-    mp_mutex_unlock(&sub->lock);
+    pthread_mutex_unlock(&sub->lock);
     return r;
 }
 
 void sub_preload(struct dec_sub *sub)
 {
-    mp_mutex_lock(&sub->lock);
+    pthread_mutex_lock(&sub->lock);
 
     struct mp_dispatch_queue *demux_waiter = mp_dispatch_create(NULL);
     demux_set_stream_wakeup_cb(sub->sh, wakeup_demux, demux_waiter);
@@ -277,13 +255,13 @@ void sub_preload(struct dec_sub *sub)
         if (!pkt)
             break;
         sub->sd->driver->decode(sub->sd, pkt);
-        MP_TARRAY_APPEND(sub, sub->cached_pkts, sub->num_cached_pkts, pkt);
+        talloc_free(pkt);
     }
 
     demux_set_stream_wakeup_cb(sub->sh, NULL, NULL);
     talloc_free(demux_waiter);
 
-    mp_mutex_unlock(&sub->lock);
+    pthread_mutex_unlock(&sub->lock);
 }
 
 static bool is_new_segment(struct dec_sub *sub, struct demux_packet *p)
@@ -292,52 +270,13 @@ static bool is_new_segment(struct dec_sub *sub, struct demux_packet *p)
         (p->start != sub->start || p->end != sub->end || p->codec != sub->codec);
 }
 
-static bool is_packet_visible(struct demux_packet *p, double video_pts)
+// Read packets from the demuxer stream passed to sub_create(). Return true if
+// enough packets were read, false if the player should wait until the demuxer
+// signals new packets available (and then should retry).
+bool sub_read_packets(struct dec_sub *sub, double video_pts)
 {
-    return p && p->pts <= video_pts && (video_pts <= p->pts + p->sub_duration ||
-           p->sub_duration < 0);
-}
-
-static bool update_pkt_cache(struct dec_sub *sub, double video_pts)
-{
-    if (!sub->cached_pkts[sub->cached_pkt_pos])
-        return false;
-
-    struct demux_packet *pkt = sub->cached_pkts[sub->cached_pkt_pos];
-    struct demux_packet *next_pkt = sub->cached_pkt_pos + 1 < sub->num_cached_pkts ?
-                                    sub->cached_pkts[sub->cached_pkt_pos + 1] : NULL;
-    if (!pkt)
-        return false;
-
-    double pts = video_pts + sub->shared_opts->sub_delay[sub->order];
-    double next_pts = next_pkt ? next_pkt->pts : INT_MAX;
-    double end_pts = pkt->sub_duration >= 0 ? pkt->pts + pkt->sub_duration : INT_MAX;
-
-    if (next_pts < pts || end_pts < pts) {
-        if (sub->cached_pkt_pos + 1 < sub->num_cached_pkts) {
-            TA_FREEP(&sub->cached_pkts[sub->cached_pkt_pos]);
-            pkt = NULL;
-            sub->cached_pkt_pos++;
-        }
-        if (next_pts < pts)
-            return true;
-    }
-
-    if (pkt && pkt->animated == 1)
-        return true;
-
-    return false;
-}
-
-// Read packets from the demuxer stream passed to sub_create(). Signals if
-// enough packets were read and if the subtitle state updated in anyway. If
-// packets_read is false, the player should wait until the demuxer signals new
-// packets and retry.
-void sub_read_packets(struct dec_sub *sub, double video_pts, bool force,
-                      bool *packets_read, bool *sub_updated)
-{
-    *packets_read = true;
-    mp_mutex_lock(&sub->lock);
+    bool r = true;
+    pthread_mutex_lock(&sub->lock);
     video_pts = pts_to_subtitle(sub, video_pts);
     while (1) {
         bool read_more = true;
@@ -356,8 +295,7 @@ void sub_read_packets(struct dec_sub *sub, double video_pts, bool force,
             break;
 
         // (Use this mechanism only if sub_delay matters to avoid corner cases.)
-        float delay = sub->order < 0 ? 0.0f : sub->shared_opts->sub_delay[sub->order];
-        double min_pts = delay < 0 || force ? video_pts : MP_NOPTS_VALUE;
+        double min_pts = sub->opts->sub_delay < 0 ? video_pts : MP_NOPTS_VALUE;
 
         struct demux_packet *pkt;
         int st = demux_read_packet_async_until(sub->sh, min_pts, &pkt);
@@ -367,8 +305,8 @@ void sub_read_packets(struct dec_sub *sub, double video_pts, bool force,
         // happen for interleaved subtitle streams, which never return "wait"
         // when reading, unless min_pts is set.
         if (st <= 0) {
-            *packets_read = st < 0 || (sub->last_pkt_pts != MP_NOPTS_VALUE &&
-                                       sub->last_pkt_pts > video_pts);
+            r = st < 0 || (sub->last_pkt_pts != MP_NOPTS_VALUE &&
+                           sub->last_pkt_pts > video_pts);
             break;
         }
 
@@ -376,10 +314,9 @@ void sub_read_packets(struct dec_sub *sub, double video_pts, bool force,
             mp_recorder_feed_packet(sub->recorder_sink, pkt);
 
         sub->last_pkt_pts = pkt->pts;
-        MP_TARRAY_APPEND(sub, sub->cached_pkts, sub->num_cached_pkts, pkt);
 
         if (is_new_segment(sub, pkt)) {
-            sub->new_segment = demux_copy_packet(sub->packet_pool, pkt);
+            sub->new_segment = pkt;
             // Note that this can be delayed to a much later point in time.
             update_segment(sub);
             break;
@@ -387,33 +324,18 @@ void sub_read_packets(struct dec_sub *sub, double video_pts, bool force,
 
         if (!(sub->preload_attempted && sub->sd->preload_ok))
             sub->sd->driver->decode(sub->sd, pkt);
-    }
-    if (sub->cached_pkts && sub->num_cached_pkts) {
-        bool visible = is_packet_visible(sub->cached_pkts[sub->cached_pkt_pos], video_pts);
-        *sub_updated = update_pkt_cache(sub, video_pts) || sub->sub_visible != visible;
-        sub->sub_visible = visible;
-    }
-    mp_mutex_unlock(&sub->lock);
-}
 
-// Redecode all cached packets if needed.
-// Used with UPDATE_SUB_HARD and UPDATE_SUB_FILT.
-void sub_redecode_cached_packets(struct dec_sub *sub)
-{
-    mp_mutex_lock(&sub->lock);
-    int index = sub->cached_pkt_pos;
-    while (index < sub->num_cached_pkts) {
-        sub->sd->driver->decode(sub->sd, sub->cached_pkts[index]);
-        ++index;
+        talloc_free(pkt);
     }
-    mp_mutex_unlock(&sub->lock);
+    pthread_mutex_unlock(&sub->lock);
+    return r;
 }
 
 // Unref sub_bitmaps.rc to free the result. May return NULL.
 struct sub_bitmaps *sub_get_bitmaps(struct dec_sub *sub, struct mp_osd_res dim,
                                     int format, double pts)
 {
-    mp_mutex_lock(&sub->lock);
+    pthread_mutex_lock(&sub->lock);
 
     pts = pts_to_subtitle(sub, pts);
 
@@ -426,14 +348,14 @@ struct sub_bitmaps *sub_get_bitmaps(struct dec_sub *sub, struct mp_osd_res dim,
         sub->sd->driver->get_bitmaps)
         res = sub->sd->driver->get_bitmaps(sub->sd, dim, format, pts);
 
-    mp_mutex_unlock(&sub->lock);
+    pthread_mutex_unlock(&sub->lock);
     return res;
 }
 
 // The returned string is talloc'ed.
 char *sub_get_text(struct dec_sub *sub, double pts, enum sd_text_type type)
 {
-    mp_mutex_lock(&sub->lock);
+    pthread_mutex_lock(&sub->lock);
     char *text = NULL;
 
     pts = pts_to_subtitle(sub, pts);
@@ -443,27 +365,13 @@ char *sub_get_text(struct dec_sub *sub, double pts, enum sd_text_type type)
 
     if (sub->sd->driver->get_text)
         text = sub->sd->driver->get_text(sub->sd, pts, type);
-    mp_mutex_unlock(&sub->lock);
+    pthread_mutex_unlock(&sub->lock);
     return text;
-}
-
-char *sub_ass_get_extradata(struct dec_sub *sub)
-{
-    char *data = NULL;
-    mp_mutex_lock(&sub->lock);
-    if (strcmp(sub->sd->codec->codec, "ass") != 0)
-        goto done;
-    char *extradata = sub->sd->codec->extradata;
-    int extradata_size = sub->sd->codec->extradata_size;
-    data = talloc_strndup(NULL, extradata, extradata_size);
-done:
-    mp_mutex_unlock(&sub->lock);
-    return data;
 }
 
 struct sd_times sub_get_times(struct dec_sub *sub, double pts)
 {
-    mp_mutex_lock(&sub->lock);
+    pthread_mutex_lock(&sub->lock);
     struct sd_times res = { .start = MP_NOPTS_VALUE, .end = MP_NOPTS_VALUE };
 
     pts = pts_to_subtitle(sub, pts);
@@ -474,35 +382,34 @@ struct sd_times sub_get_times(struct dec_sub *sub, double pts)
     if (sub->sd->driver->get_times)
         res = sub->sd->driver->get_times(sub->sd, pts);
 
-    mp_mutex_unlock(&sub->lock);
+    pthread_mutex_unlock(&sub->lock);
     return res;
 }
 
 void sub_reset(struct dec_sub *sub)
 {
-    mp_mutex_lock(&sub->lock);
+    pthread_mutex_lock(&sub->lock);
     if (sub->sd->driver->reset)
         sub->sd->driver->reset(sub->sd);
     sub->last_pkt_pts = MP_NOPTS_VALUE;
     sub->last_vo_pts = MP_NOPTS_VALUE;
-    destroy_cached_pkts(sub);
-    demux_packet_pool_push(sub->packet_pool, sub->new_segment);
+    talloc_free(sub->new_segment);
     sub->new_segment = NULL;
-    mp_mutex_unlock(&sub->lock);
+    pthread_mutex_unlock(&sub->lock);
 }
 
 void sub_select(struct dec_sub *sub, bool selected)
 {
-    mp_mutex_lock(&sub->lock);
+    pthread_mutex_lock(&sub->lock);
     if (sub->sd->driver->select)
         sub->sd->driver->select(sub->sd, selected);
-    mp_mutex_unlock(&sub->lock);
+    pthread_mutex_unlock(&sub->lock);
 }
 
 int sub_control(struct dec_sub *sub, enum sd_ctrl cmd, void *arg)
 {
     int r = CONTROL_UNKNOWN;
-    mp_mutex_lock(&sub->lock);
+    pthread_mutex_lock(&sub->lock);
     bool propagate = false;
     switch (cmd) {
     case SD_CTRL_SET_VIDEO_DEF_FPS:
@@ -520,10 +427,9 @@ int sub_control(struct dec_sub *sub, enum sd_ctrl cmd, void *arg)
         break;
     }
     case SD_CTRL_UPDATE_OPTS: {
-        uint64_t flags = *(uint64_t *)arg;
+        int flags = (uintptr_t)arg;
         if (m_config_cache_update(sub->opts_cache))
             update_subtitle_speed(sub);
-        m_config_cache_update(sub->shared_opts_cache);
         propagate = true;
         if (flags & UPDATE_SUB_HARD) {
             // forget about the previous preload because
@@ -538,36 +444,30 @@ int sub_control(struct dec_sub *sub, enum sd_ctrl cmd, void *arg)
     }
     if (propagate && sub->sd->driver->control)
         r = sub->sd->driver->control(sub->sd, cmd, arg);
-    mp_mutex_unlock(&sub->lock);
+    pthread_mutex_unlock(&sub->lock);
     return r;
 }
 
 void sub_set_recorder_sink(struct dec_sub *sub, struct mp_recorder_sink *sink)
 {
-    mp_mutex_lock(&sub->lock);
+    pthread_mutex_lock(&sub->lock);
     sub->recorder_sink = sink;
-    mp_mutex_unlock(&sub->lock);
+    pthread_mutex_unlock(&sub->lock);
 }
 
 void sub_set_play_dir(struct dec_sub *sub, int dir)
 {
-    mp_mutex_lock(&sub->lock);
+    pthread_mutex_lock(&sub->lock);
     sub->play_dir = dir;
-    mp_mutex_unlock(&sub->lock);
+    pthread_mutex_unlock(&sub->lock);
 }
 
 bool sub_is_primary_visible(struct dec_sub *sub)
 {
-    mp_mutex_lock(&sub->lock);
-    bool ret = sub->shared_opts->sub_visibility[0];
-    mp_mutex_unlock(&sub->lock);
-    return ret;
+    return !!sub->opts->sub_visibility;
 }
 
 bool sub_is_secondary_visible(struct dec_sub *sub)
 {
-    mp_mutex_lock(&sub->lock);
-    bool ret = sub->shared_opts->sub_visibility[1];
-    mp_mutex_unlock(&sub->lock);
-    return ret;
+    return !!sub->opts->sec_sub_visibility;
 }

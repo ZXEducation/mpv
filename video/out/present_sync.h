@@ -25,24 +25,15 @@
 /* Generic helpers for obtaining presentation feedback from
  * backend APIs. This requires ust/msc values. */
 
-struct mp_present_entry {
-    int64_t ust;
-    int64_t msc;
-    int64_t vsync_duration;
-    int64_t skipped_vsyncs;
-    int64_t queue_display_time;
-
-    struct {
-        struct mp_present_entry *next, *prev;
-    } list_node;
-};
-
 struct mp_present {
-    struct mp_present_entry *head, *tail;
-    struct mp_vo_opts *opts;
+    int64_t current_ust;
+    int64_t current_msc;
+    int64_t last_ust;
+    int64_t last_msc;
+    int64_t vsync_duration;
+    int64_t last_skipped_vsyncs;
+    int64_t last_queue_display_time;
 };
-
-struct mp_present *mp_present_initialize(void *talloc_ctx, struct mp_vo_opts *opts, int entries);
 
 // Used during the get_vsync call to deliver the presentation statistics to the VO.
 void present_sync_get_info(struct mp_present *present, struct vo_vsync_info *info);
@@ -51,7 +42,7 @@ void present_sync_get_info(struct mp_present *present, struct vo_vsync_info *inf
 void present_sync_swap(struct mp_present *present);
 
 // Called anytime the backend delivers new ust/msc values.
-void present_sync_update_values(struct mp_present *present, int64_t ust,
+void present_update_sync_values(struct mp_present *present, int64_t ust,
                                 int64_t msc);
 
 #endif /* MP_PRESENT_SYNC_H */

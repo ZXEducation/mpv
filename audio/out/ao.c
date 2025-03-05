@@ -40,7 +40,6 @@ extern const struct ao_driver audio_out_audiotrack;
 extern const struct ao_driver audio_out_audiounit;
 extern const struct ao_driver audio_out_coreaudio;
 extern const struct ao_driver audio_out_coreaudio_exclusive;
-extern const struct ao_driver audio_out_avfoundation;
 extern const struct ao_driver audio_out_rsound;
 extern const struct ao_driver audio_out_pipewire;
 extern const struct ao_driver audio_out_sndio;
@@ -65,9 +64,6 @@ static const struct ao_driver * const audio_out_drivers[] = {
 #endif
 #if HAVE_COREAUDIO
     &audio_out_coreaudio,
-#endif
-#if HAVE_AVFOUNDATION
-    &audio_out_avfoundation,
 #endif
 #if HAVE_PIPEWIRE
     &audio_out_pipewire,
@@ -241,7 +237,7 @@ static struct ao *ao_init(bool probing, struct mpv_global *global,
     } else {
         ao->sstride *= ao->channels.num;
     }
-    ao->bps = (int64_t)ao->samplerate * ao->sstride;
+    ao->bps = ao->samplerate * ao->sstride;
 
     if (ao->device_buffer <= 0 && ao->driver->write) {
         MP_ERR(ao, "Device buffer size not set.\n");
@@ -616,7 +612,7 @@ void ao_set_gain(struct ao *ao, float gain)
 
 #define MUL_GAIN_f(d, num_samples, gain)                                        \
     for (int n = 0; n < (num_samples); n++)                                     \
-        (d)[n] = (d)[n] * (gain)
+        (d)[n] = MPCLAMP(((d)[n]) * (gain), -1.0, 1.0)
 
 static void process_plane(struct ao *ao, void *data, int num_samples)
 {

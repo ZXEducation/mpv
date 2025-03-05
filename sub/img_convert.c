@@ -31,8 +31,7 @@
 void mp_blur_rgba_sub_bitmap(struct sub_bitmap *d, double gblur)
 {
     struct mp_image *tmp1 = mp_image_alloc(IMGFMT_BGRA, d->w, d->h);
-    MP_HANDLE_OOM(tmp1);
-    {
+    if (tmp1) { // on OOM, skip region
         struct mp_image s = {0};
         mp_image_setfmt(&s, IMGFMT_BGRA);
         mp_image_set_size(&s, d->w, d->h);

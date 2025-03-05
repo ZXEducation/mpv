@@ -15,15 +15,13 @@
  * License along with mpv.  If not, see <http://www.gnu.org/licenses/>.
  */
 
-#include <stdbool.h>
-
 #include <SDL.h>
-
+#include <stdbool.h>
+#include <pthread.h>
 #include "common/common.h"
 #include "common/msg.h"
 #include "input.h"
 #include "input/keycodes.h"
-#include "osdep/threads.h"
 
 struct gamepad_priv {
     SDL_GameController *controller;
@@ -36,7 +34,7 @@ static void initialize_events(void)
     gamepad_cancel_wakeup = SDL_RegisterEvents(1);
 }
 
-static mp_once events_initialized = MP_STATIC_ONCE_INITIALIZER;
+static pthread_once_t events_initialized = PTHREAD_ONCE_INIT;
 
 #define INVALID_KEY -1
 
@@ -200,10 +198,6 @@ static void remove_gamepad(struct mp_input_src *src, int id)
 
 static void read_gamepad_thread(struct mp_input_src *src, void *param)
 {
-#if SDL_VERSION_ATLEAST(2, 0, 14)
-    SDL_SetHint(SDL_HINT_JOYSTICK_THREAD, "1");
-#endif
-
     if (SDL_WasInit(SDL_INIT_EVENTS)) {
         MP_ERR(src, "Another component is using SDL already.\n");
         mp_input_src_init_done(src);
@@ -216,7 +210,7 @@ static void read_gamepad_thread(struct mp_input_src *src, void *param)
         return;
     }
 
-    mp_exec_once(&events_initialized, initialize_events);
+    pthread_once(&events_initialized, initialize_events);
 
     if (gamepad_cancel_wakeup == (Uint32)-1) {
         MP_ERR(src, "Can't register SDL custom events\n");

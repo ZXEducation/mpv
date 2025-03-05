@@ -43,7 +43,6 @@
 struct opts {
     bool deint_enabled;
     bool interlaced_only;
-    int field_parity;
     struct mp_vdpau_mixer_opts opts;
 };
 
@@ -75,7 +74,8 @@ static void vf_vdpaupp_process(struct mp_filter *f)
 
     struct mp_image *mpi =
         mp_vdpau_mixed_frame_create(mp_refqueue_get_field(p->queue, 0));
-    MP_HANDLE_OOM(mpi);
+    if (!mpi)
+        return; // OOM
     struct mp_vdpau_mixer_frame *frame = mp_vdpau_mixed_frame_get(mpi);
 
     if (!mp_refqueue_should_deint(p->queue)) {
@@ -137,7 +137,7 @@ static struct mp_filter *vf_vdpaupp_create(struct mp_filter *parent, void *optio
     p->queue = mp_refqueue_alloc(f);
 
     struct mp_hwdec_ctx *hwdec_ctx =
-        mp_filter_load_hwdec_device(f, IMGFMT_VDPAU, AV_HWDEVICE_TYPE_VDPAU);
+        mp_filter_load_hwdec_device(f, IMGFMT_VDPAU);
     if (!hwdec_ctx || !hwdec_ctx->av_device_ref)
         goto error;
     p->ctx = mp_vdpau_get_ctx_from_av(hwdec_ctx->av_device_ref);
@@ -156,8 +156,6 @@ static struct mp_filter *vf_vdpaupp_create(struct mp_filter *parent, void *optio
         (p->opts->deint_enabled ? MP_MODE_DEINT : 0) |
         (p->opts->interlaced_only ? MP_MODE_INTERLACED_ONLY : 0) |
         (p->opts->opts.deint >= 2 ? MP_MODE_OUTPUT_FIELDS : 0));
-
-    mp_refqueue_set_parity(p->queue, p->opts->field_parity);
 
     mp_refqueue_add_in_format(p->queue, IMGFMT_VDPAU, 0);
 
@@ -183,10 +181,6 @@ static const m_option_t vf_opts_fields[] = {
     {"sharpen", OPT_FLOAT(opts.sharpen), M_RANGE(-1, 1)},
     {"hqscaling", OPT_INT(opts.hqscaling), M_RANGE(0, 9)},
     {"interlaced-only", OPT_BOOL(interlaced_only)},
-    {"parity", OPT_CHOICE(field_parity,
-        {"tff", MP_FIELD_PARITY_TFF},
-        {"bff", MP_FIELD_PARITY_BFF},
-        {"auto", MP_FIELD_PARITY_AUTO})},
     {0}
 };
 
@@ -195,9 +189,6 @@ const struct mp_user_filter_entry vf_vdpaupp = {
         .description = "vdpau postprocessing",
         .name = "vdpaupp",
         .priv_size = sizeof(OPT_BASE_STRUCT),
-        .priv_defaults = &(const OPT_BASE_STRUCT){
-            .field_parity = MP_FIELD_PARITY_AUTO,
-        },
         .options = vf_opts_fields,
     },
     .create = vf_vdpaupp_create,

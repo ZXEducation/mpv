@@ -17,8 +17,11 @@
 
 #include <assert.h>
 #include <string.h>
+#include <strings.h>
 #include <sys/types.h>
 #include <sys/stat.h>
+#include <unistd.h>
+#include <dirent.h>
 #include <math.h>
 
 #include <lua.h>
@@ -47,46 +50,34 @@
 #include "core.h"
 #include "command.h"
 #include "client.h"
-#include "mpv/client.h"
+#include "libmpv/client.h"
 
 // List of builtin modules and their contents as strings.
 // All these are generated from player/lua/*.lua
 static const char * const builtin_lua_scripts[][2] = {
     {"mp.defaults",
-#   include "player/lua/defaults.lua.inc"
+#   include "generated/player/lua/defaults.lua.inc"
     },
     {"mp.assdraw",
-#   include "player/lua/assdraw.lua.inc"
-    },
-    {"mp.fzy",
-#   include "player/lua/fzy.lua.inc"
-    },
-    {"mp.input",
-#   include "player/lua/input.lua.inc"
+#   include "generated/player/lua/assdraw.lua.inc"
     },
     {"mp.options",
-#   include "player/lua/options.lua.inc"
+#   include "generated/player/lua/options.lua.inc"
     },
     {"@osc.lua",
-#   include "player/lua/osc.lua.inc"
+#   include "generated/player/lua/osc.lua.inc"
     },
     {"@ytdl_hook.lua",
-#   include "player/lua/ytdl_hook.lua.inc"
+#   include "generated/player/lua/ytdl_hook.lua.inc"
     },
     {"@stats.lua",
-#   include "player/lua/stats.lua.inc"
+#   include "generated/player/lua/stats.lua.inc"
     },
     {"@console.lua",
-#   include "player/lua/console.lua.inc"
+#   include "generated/player/lua/console.lua.inc"
     },
     {"@auto_profiles.lua",
-#   include "player/lua/auto_profiles.lua.inc"
-    },
-    {"@select.lua",
-#   include "player/lua/select.lua.inc"
-    },
-    {"@positioning.lua",
-#   include "player/lua/positioning.lua.inc"
+#   include "generated/player/lua/auto_profiles.lua.inc"
     },
     {0}
 };
@@ -108,6 +99,7 @@ struct script_ctx {
 
 #if LUA_VERSION_NUM <= 501
 #define mp_cpcall lua_cpcall
+#define mp_lua_len lua_objlen
 #else
 // Curse whoever had this stupid idea. Curse whoever thought it would be a good
 // idea not to include an emulated lua_cpcall() even more.
@@ -117,6 +109,7 @@ static int mp_cpcall (lua_State *L, lua_CFunction func, void *ud)
     lua_pushlightuserdata(L, ud);
     return lua_pcall(L, 1, 0, 0);
 }
+#define mp_lua_len lua_rawlen
 #endif
 
 // Ensure that the given argument exists, even if it's nil. Can be used to
@@ -485,8 +478,6 @@ static int load_lua(struct mp_script_args *args)
     r = 0;
 
 error_out:
-    if (ctx->lua_allocf)
-        lua_setallocf(L, ctx->lua_allocf, ctx->lua_alloc_ud);
     if (ctx->state)
         lua_close(ctx->state);
     talloc_free(ctx);
@@ -496,9 +487,10 @@ error_out:
 static int check_loglevel(lua_State *L, int arg)
 {
     const char *level = luaL_checkstring(L, arg);
-    int n = mp_msg_find_level(level);
-    if (n >= 0)
-        return n;
+    for (int n = 0; n < MSGL_MAX; n++) {
+        if (mp_log_levels[n] && strcasecmp(mp_log_levels[n], level) == 0)
+            return n;
+    }
     luaL_error(L, "Invalid log level '%s'", level);
     abort();
 }
@@ -518,7 +510,7 @@ static int script_log(lua_State *L)
         const char *s = lua_tostring(L, -1);
         if (s == NULL)
             return luaL_error(L, "Invalid argument");
-        mp_msg(ctx->log, msgl, (i == 2 ? "%s" : " %s"), s);
+        mp_msg(ctx->log, msgl, "%s%s", s, i > 0 ? " " : "");
         lua_pop(L, 1);  // args... tostring
     }
     mp_msg(ctx->log, msgl, "\n");
@@ -1193,11 +1185,11 @@ static int script_format_json(lua_State *L, void *tmp)
     char *dst = talloc_strdup(tmp, "");
     if (json_write(&dst, &node) >= 0) {
         lua_pushstring(L, dst);
-        return 1;
+        lua_pushnil(L);
+    } else {
+        lua_pushnil(L);
+        lua_pushstring(L, "error");
     }
-
-    lua_pushnil(L);
-    lua_pushstring(L, "error");
     return 2;
 }
 
@@ -1344,7 +1336,7 @@ static void add_functions(struct script_ctx *ctx)
 }
 
 const struct mp_scripting mp_scripting_lua = {
-    .name = "lua",
+    .name = "lua script",
     .file_ext = "lua",
     .load = load_lua,
 };

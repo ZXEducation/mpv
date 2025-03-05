@@ -17,29 +17,36 @@
  * with mpv.  If not, see <http://www.gnu.org/licenses/>.
  */
 
-#include <stdbool.h>
-#include <stdio.h>
-#include <stdlib.h>
+#include "config.h"
 
 #include <cdio/cdio.h>
 
-#ifndef TESTING_IS_FINISHED
-// Suppress Wundef warning
-#define TESTING_IS_FINISHED 0
+#if CDIO_API_VERSION < 6
+#define OLD_API
 #endif
+
+#ifdef OLD_API
+#include <cdio/cdda.h>
+#include <cdio/paranoia.h>
+#else
 #include <cdio/paranoia/cdda.h>
 #include <cdio/paranoia/paranoia.h>
+#endif
 
-#include "common/msg.h"
-#include "config.h"
+#include <stdio.h>
+#include <stdlib.h>
+#include <stdbool.h>
+
 #include "mpv_talloc.h"
 
 #include "stream.h"
 #include "options/m_option.h"
 #include "options/m_config.h"
 #include "options/options.h"
-#include "options/path.h"
 
+#include "common/msg.h"
+
+#include "config.h"
 #if !HAVE_GPL
 #error GPL only
 #endif
@@ -54,11 +61,11 @@ typedef struct cdda_params {
     size_t data_pos;
 
     // options
-    char *cdda_device;
     int speed;
     int paranoia_mode;
     int sector_size;
     int search_overlap;
+    int toc_bias;
     int toc_offset;
     bool skip;
     char *device;
@@ -69,16 +76,17 @@ typedef struct cdda_params {
 #define OPT_BASE_STRUCT struct cdda_params
 const struct m_sub_options stream_cdda_conf = {
     .opts = (const m_option_t[]) {
-        {"device", OPT_STRING(cdda_device), .flags = M_OPT_FILE},
         {"speed", OPT_INT(speed), M_RANGE(1, 100)},
         {"paranoia", OPT_INT(paranoia_mode), M_RANGE(0, 2)},
         {"sector-size", OPT_INT(sector_size), M_RANGE(1, 100)},
         {"overlap", OPT_INT(search_overlap), M_RANGE(0, 75)},
+        {"toc-bias", OPT_INT(toc_bias)},
         {"toc-offset", OPT_INT(toc_offset)},
         {"skip", OPT_BOOL(skip)},
-        {"span-a", OPT_INT(span[0]), .deprecation_message = "--start=#N"},
-        {"span-b", OPT_INT(span[1]), .deprecation_message = "--end=#N"},
+        {"span-a", OPT_INT(span[0])},
+        {"span-b", OPT_INT(span[1])},
         {"cdtext", OPT_BOOL(cdtext)},
+        {"span", OPT_REMOVED("use span-a/span-b")},
         {0}
     },
     .size = sizeof(struct cdda_params),
@@ -89,6 +97,16 @@ const struct m_sub_options stream_cdda_conf = {
 };
 
 static const char *const cdtext_name[] = {
+#ifdef OLD_API
+    [CDTEXT_ARRANGER] = "Arranger",
+    [CDTEXT_COMPOSER] = "Composer",
+    [CDTEXT_MESSAGE]  =  "Message",
+    [CDTEXT_ISRC] =  "ISRC",
+    [CDTEXT_PERFORMER] = "Performer",
+    [CDTEXT_SONGWRITER] =  "Songwriter",
+    [CDTEXT_TITLE] =  "Title",
+    [CDTEXT_UPC_EAN] = "UPC_EAN",
+#else
     [CDTEXT_FIELD_ARRANGER] = "Arranger",
     [CDTEXT_FIELD_COMPOSER] = "Composer",
     [CDTEXT_FIELD_MESSAGE]  =  "Message",
@@ -97,6 +115,7 @@ static const char *const cdtext_name[] = {
     [CDTEXT_FIELD_SONGWRITER] =  "Songwriter",
     [CDTEXT_FIELD_TITLE] =  "Title",
     [CDTEXT_FIELD_UPC_EAN] = "UPC_EAN",
+#endif
 };
 
 static void print_cdtext(stream_t *s, int track)
@@ -104,12 +123,20 @@ static void print_cdtext(stream_t *s, int track)
     cdda_priv* p = (cdda_priv*)s->priv;
     if (!p->cdtext)
         return;
+#ifdef OLD_API
+    cdtext_t *text = cdio_get_cdtext(p->cd->p_cdio, track);
+#else
     cdtext_t *text = cdio_get_cdtext(p->cd->p_cdio);
+#endif
     int header = 0;
     if (text) {
         for (int i = 0; i < sizeof(cdtext_name) / sizeof(cdtext_name[0]); i++) {
             const char *name = cdtext_name[i];
+#ifdef OLD_API
+            const char *value = cdtext_get_const(i, text);
+#else
             const char *value = cdtext_get_const(text, i, track);
+#endif
             if (name && value) {
                 if (!header)
                     MP_INFO(s, "CD-Text (%s):\n", track ? "track" : "CD");
@@ -133,6 +160,7 @@ static void cdparanoia_callback(long int inpos, paranoia_cb_mode_t function)
 static int fill_buffer(stream_t *s, void *buffer, int max_len)
 {
     cdda_priv *p = (cdda_priv *)s->priv;
+    int i;
 
     if (!p->data || p->data_pos >= CDIO_CD_FRAMESIZE_RAW) {
         if ((p->sector < p->start_sector) || (p->sector > p->end_sector))
@@ -149,6 +177,14 @@ static int fill_buffer(stream_t *s, void *buffer, int max_len)
     size_t copy = MPMIN(CDIO_CD_FRAMESIZE_RAW - p->data_pos, max_len);
     memcpy(buffer, p->data + p->data_pos, copy);
     p->data_pos += copy;
+
+    for (i = 0; i < p->cd->tracks; i++) {
+        if (p->cd->disc_toc[i].dwStartSector == p->sector - 1) {
+            print_track_info(s, i + 1);
+            break;
+        }
+    }
+
     return copy;
 }
 
@@ -225,7 +261,7 @@ static int control(stream_t *stream, int cmd, void *arg)
         track += start_track;
         if (track > end_track)
             return STREAM_ERROR;
-        int64_t sector = p->cd->disc_toc[track].dwStartSector - p->start_sector;
+        int64_t sector = p->cd->disc_toc[track].dwStartSector;
         int64_t pos = sector * CDIO_CD_FRAMESIZE_RAW;
         // Assume standard audio CD: 44.1khz, 2 channels, s16 samples
         *(double *)arg = pos / (44100.0 * 2 * 2);
@@ -251,12 +287,17 @@ static int open_cdda(stream_t *st)
     cdrom_drive_t *cdd = NULL;
     int last_track;
 
+    char *global_device;
+    mp_read_option_raw(st->global, "cdrom-device", &m_option_type_string,
+                       &global_device);
+    talloc_steal(st, global_device);
+
     if (st->path[0]) {
-        p->device = talloc_strdup(priv, st->path);
-    } else if (p->cdda_device && p->cdda_device[0]) {
-        p->device = mp_get_user_path(priv, st->global, p->cdda_device);
+        p->device = st->path;
+    } else if (global_device && global_device[0]) {
+        p->device = global_device;
     } else {
-        p->device = talloc_strdup(priv, DEFAULT_OPTICAL_DEVICE);
+        p->device = DEFAULT_CDROM_DEVICE;
     }
 
 #if defined(__NetBSD__)
@@ -283,7 +324,9 @@ static int open_cdda(stream_t *st)
 
     priv->cd = cdd;
 
-    offset -= cdda_track_firstsector(cdd, 1);
+    if (p->toc_bias)
+        offset -= cdda_track_firstsector(cdd, 1);
+
     if (offset) {
         for (int n = 0; n < cdd->tracks + 1; n++)
             cdd->disc_toc[n].dwStartSector += offset;
@@ -312,6 +355,7 @@ static int open_cdda(stream_t *st)
     priv->cdp = paranoia_init(cdd);
     if (priv->cdp == NULL) {
         cdda_close(cdd);
+        free(priv);
         return STREAM_ERROR;
     }
 

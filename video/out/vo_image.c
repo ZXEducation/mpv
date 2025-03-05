@@ -66,16 +66,13 @@ struct priv {
     struct vo_image_opts *opts;
 
     struct mp_image *current;
-    char *dir;
     int frame;
 };
 
 static bool checked_mkdir(struct vo *vo, const char *buf)
 {
-    struct priv *p = vo->priv;
-    p->dir = mp_get_user_path(vo, vo->global, buf);
-    MP_INFO(vo, "Creating output directory '%s'...\n", p->dir);
-    if (mkdir(p->dir, 0755) < 0) {
+    MP_INFO(vo, "Creating output directory '%s'...\n", buf);
+    if (mkdir(buf, 0755) < 0) {
         char *errstr = mp_strerror(errno);
         if (errno == EEXIST) {
             struct stat stat_p;
@@ -90,22 +87,20 @@ static bool checked_mkdir(struct vo *vo, const char *buf)
 
 static int reconfig(struct vo *vo, struct mp_image_params *params)
 {
+    struct priv *p = vo->priv;
+    mp_image_unrefp(&p->current);
+
     return 0;
 }
 
-static bool draw_frame(struct vo *vo, struct vo_frame *frame)
+static void draw_image(struct vo *vo, mp_image_t *mpi)
 {
     struct priv *p = vo->priv;
-    if (!frame->current)
-        goto done;
 
-    p->current = frame->current;
+    p->current = mpi;
 
     struct mp_osd_res dim = osd_res_from_image_params(vo->params);
-    osd_draw_on_image(vo->osd, dim, frame->current->pts, OSD_DRAW_SUB_ONLY, p->current);
-
-done:
-    return VO_TRUE;
+    osd_draw_on_image(vo->osd, dim, mpi->pts, OSD_DRAW_SUB_ONLY, p->current);
 }
 
 static void flip_page(struct vo *vo)
@@ -120,13 +115,14 @@ static void flip_page(struct vo *vo)
     char *filename = talloc_asprintf(t, "%08d.%s", p->frame,
                                      image_writer_file_ext(p->opts->opts));
 
-    if (p->dir && strlen(p->dir))
-        filename = mp_path_join(t, p->dir, filename);
+    if (p->opts->outdir && strlen(p->opts->outdir))
+        filename = mp_path_join(t, p->opts->outdir, filename);
 
     MP_INFO(vo, "Saving %s\n", filename);
-    write_image(p->current, p->opts->opts, filename, vo->global, vo->log, true);
+    write_image(p->current, p->opts->opts, filename, vo->global, vo->log);
 
     talloc_free(t);
+    mp_image_unrefp(&p->current);
 }
 
 static int query_format(struct vo *vo, int fmt)
@@ -138,6 +134,9 @@ static int query_format(struct vo *vo, int fmt)
 
 static void uninit(struct vo *vo)
 {
+    struct priv *p = vo->priv;
+
+    mp_image_unrefp(&p->current);
 }
 
 static int preinit(struct vo *vo)
@@ -164,7 +163,7 @@ const struct vo_driver video_out_image =
     .query_format = query_format,
     .reconfig = reconfig,
     .control = control,
-    .draw_frame = draw_frame,
+    .draw_image = draw_image,
     .flip_page = flip_page,
     .uninit = uninit,
     .global_opts = &vo_image_conf,

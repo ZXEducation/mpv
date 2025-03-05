@@ -15,26 +15,28 @@
  * License along with mpv.  If not, see <http://www.gnu.org/licenses/>.
  */
 
-#include <assert.h>
-#include <errno.h>
 #include <float.h>
-#include <stdatomic.h>
-#include <stdbool.h>
-#include <stdio.h>
 #include <stdlib.h>
+#include <stdio.h>
+#include <errno.h>
 #include <string.h>
+#include <strings.h>
+#include <assert.h>
+#include <stdbool.h>
+#include <pthread.h>
 
-#include "mpv/client.h"
+#include "libmpv/client.h"
 
-#include "common/common.h"
-#include "common/msg_control.h"
-#include "common/msg.h"
-#include "m_config_frontend.h"
 #include "m_config.h"
+#include "m_config_frontend.h"
+#include "options/m_option.h"
+#include "common/common.h"
+#include "common/global.h"
+#include "common/msg.h"
+#include "common/msg_control.h"
 #include "misc/dispatch.h"
 #include "misc/node.h"
-#include "options/m_option.h"
-#include "osdep/threads.h"
+#include "osdep/atomic.h"
 
 extern const char mp_help_text[];
 
@@ -78,6 +80,7 @@ static void list_profiles(struct m_config *config)
     MP_INFO(config, "Available profiles:\n");
     for (struct m_profile *p = config->profiles; p; p = p->next)
         MP_INFO(config, "\t%s\t%s\n", p->name, p->desc ? p->desc : "");
+    MP_INFO(config, "\n");
 }
 
 static int show_profile(struct m_config *config, bstr param)
@@ -118,6 +121,8 @@ static int show_profile(struct m_config *config, bstr param)
         }
     }
     config->profile_depth--;
+    if (!config->profile_depth)
+        MP_INFO(config, "\n");
     return M_OPT_EXIT;
 }
 
@@ -163,9 +168,18 @@ static int m_config_set_obj_params(struct m_config *config, struct mp_log *log,
 
 struct m_config *m_config_from_obj_desc_and_args(void *ta_parent,
     struct mp_log *log, struct mpv_global *global, struct m_obj_desc *desc,
-    char **args)
+    const char *name, struct m_obj_settings *defaults, char **args)
 {
     struct m_config *config = m_config_from_obj_desc(ta_parent, log, global, desc);
+
+    for (int n = 0; defaults && defaults[n].name; n++) {
+        struct m_obj_settings *entry = &defaults[n];
+        if (name && strcmp(entry->name, name) == 0) {
+            if (m_config_set_obj_params(config, log, global, desc, entry->attribs) < 0)
+                goto error;
+        }
+    }
+
     if (m_config_set_obj_params(config, log, global, desc, args) < 0)
         goto error;
 
@@ -298,9 +312,7 @@ static struct m_config_option *m_config_get_co_any(const struct m_config *config
 
     const char *prefix = config->is_toplevel ? "--" : "";
     if (co->opt->type == &m_option_type_alias) {
-        char buf[M_CONFIG_MAX_OPT_NAME_LEN];
-        const char *alias = m_config_shadow_get_alias_from_opt(config->shadow, co->opt_id,
-                                                               buf, sizeof(buf));
+        const char *alias = (const char *)co->opt->priv;
         if (co->opt->deprecation_message && !co->warning_was_printed) {
             if (co->opt->deprecation_message[0]) {
                 MP_WARN(config, "Warning: option %s%s was replaced with "
@@ -383,7 +395,7 @@ const char *m_config_get_positional_option(const struct m_config *config, int p)
 static int handle_set_opt_flags(struct m_config *config,
                                 struct m_config_option *co, int flags)
 {
-    uint64_t optflags = co->opt->flags;
+    int optflags = co->opt->flags;
     bool set = !(flags & M_SETOPT_CHECK_ONLY);
 
     if ((flags & M_SETOPT_PRE_PARSE_ONLY) && !(optflags & M_OPT_PRE_PARSE))
@@ -661,13 +673,10 @@ static struct m_config_option *m_config_mogrify_cli_opt(struct m_config *config,
     bstr no_name = *name;
     if (!co && bstr_eatstart0(&no_name, "no-")) {
         co = m_config_get_co(config, no_name);
-        if (!co)
-            return NULL;
 
         // Not all choice types have this value - if they don't, then parsing
         // them will simply result in an error. Good enough.
-        if (!(co->opt->type->flags & M_OPT_TYPE_CHOICE) &&
-            !(co->opt->flags & M_OPT_ALLOW_NO))
+        if (!co || !(co->opt->type->flags & M_OPT_TYPE_CHOICE))
             return NULL;
 
         *name = no_name;
@@ -749,7 +758,7 @@ int m_config_set_option_cli(struct m_config *config, struct bstr name,
                    BSTR_P(name), BSTR_P(param), flags);
     }
 
-    union m_option_value val = m_option_value_default;
+    union m_option_value val = {0};
 
     // Some option types are "impure" and work on the existing data.
     // (Prime examples: --vf-add, --sub-file)
@@ -783,7 +792,7 @@ int m_config_set_option_node(struct m_config *config, bstr name,
 
     // Do this on an "empty" type to make setting the option strictly overwrite
     // the old value, as opposed to e.g. appending to lists.
-    union m_option_value val = m_option_value_default;
+    union m_option_value val = {0};
 
     if (data->format == MPV_FORMAT_STRING) {
         bstr param = bstr0(data->u.string);
@@ -868,10 +877,11 @@ void m_config_print_option_list(const struct m_config *config, const char *name)
         }
         char *def = NULL;
         const void *defptr = m_config_get_co_default(config, co);
+        const union m_option_value default_value = {0};
         if (!defptr)
-            defptr = &m_option_value_default;
+            defptr = &default_value;
         if (defptr)
-            def = m_option_pretty_print(opt, defptr, false);
+            def = m_option_pretty_print(opt, defptr);
         if (def) {
             MP_INFO(config, " (default: %s)", def);
             talloc_free(def);
@@ -882,12 +892,8 @@ void m_config_print_option_list(const struct m_config *config, const char *name)
             MP_INFO(config, " [file]");
         if (opt->deprecation_message)
             MP_INFO(config, " [deprecated]");
-        if (opt->type == &m_option_type_alias) {
-            char buf[M_CONFIG_MAX_OPT_NAME_LEN];
-            const char *alias = m_config_shadow_get_alias_from_opt(config->shadow, co->opt_id,
-                                                                   buf, sizeof(buf));
-            MP_INFO(config, " for %s", alias);
-        }
+        if (opt->type == &m_option_type_alias)
+            MP_INFO(config, " for %s", (char *)opt->priv);
         if (opt->type == &m_option_type_cli_alias)
             MP_INFO(config, " for --%s (CLI/config files only)", (char *)opt->priv);
         MP_INFO(config, "\n");
@@ -995,11 +1001,6 @@ static struct m_profile *find_check_profile(struct m_config *config, char *name)
 
 int m_config_set_profile(struct m_config *config, char *name, int flags)
 {
-    if ((flags & M_SETOPT_FROM_CONFIG_FILE) && !strcmp(name, "default")) {
-        MP_WARN(config, "Ignoring profile=%s from config file.\n", name);
-        return 0;
-    }
-
     MP_VERBOSE(config, "Applying profile '%s'...\n", name);
     struct m_profile *p = find_check_profile(config, name);
     if (!p)
@@ -1050,7 +1051,7 @@ int m_config_restore_profile(struct m_config *config, char *name)
 void m_config_finish_default_profile(struct m_config *config, int flags)
 {
     struct m_profile *p = m_config_add_profile(config, NULL);
-    m_config_set_profile(config, p->name, flags & ~M_SETOPT_FROM_CONFIG_FILE);
+    m_config_set_profile(config, p->name, flags);
     p->num_opts = 0;
 }
 

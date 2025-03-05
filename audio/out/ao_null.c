@@ -116,11 +116,10 @@ static void uninit(struct ao *ao)
 {
 }
 
-// stop playing and empty buffers (for seeking)
+// stop playing and empty buffers (for seeking/pause)
 static void reset(struct ao *ao)
 {
     struct priv *priv = ao->priv;
-    priv->paused = false;
     priv->buffered = 0;
     priv->playing = false;
 }

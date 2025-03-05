@@ -1,9 +1,11 @@
-#include "config.h"
-
 #include "audio/chmap.h"
-#include "audio/chmap_avchannel.h"
 #include "audio/chmap_sel.h"
+#include "config.h"
 #include "test_utils.h"
+
+#if HAVE_AV_CHANNEL_LAYOUT
+#include "audio/chmap_avchannel.h"
+#endif
 
 #define LAYOUTS(...) (char*[]){__VA_ARGS__, NULL}
 
@@ -32,6 +34,7 @@ static void test_sel(const char *input, const char *expected_selection,
                         mp_chmap_to_str(&expected_map));
 }
 
+#if HAVE_AV_CHANNEL_LAYOUT
 static bool layout_matches(const AVChannelLayout *av_layout,
                            const struct mp_chmap *mp_layout,
                            bool require_default_unspec)
@@ -148,6 +151,8 @@ static void test_av_channel_layout_to_mp_chmap(void)
 
     assert_false(anything_failed);
 }
+#endif
+
 
 int main(void)
 {
@@ -205,8 +210,9 @@ int main(void)
     assert_int_equal(mp_chmap_diffn(&a, &b), 0);
     assert_int_equal(mp_chmap_diffn(&b, &a), 3);
 
+#if HAVE_AV_CHANNEL_LAYOUT
     test_av_channel_layout_to_mp_chmap();
     test_mp_chmap_to_av_channel_layout();
-
+#endif
     return 0;
 }

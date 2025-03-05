@@ -1,5 +1,6 @@
 -- Note: anything global is accessible by profile condition expressions.
 
+local utils = require 'mp.utils'
 local msg = require 'mp.msg'
 
 local profiles = {}
@@ -13,7 +14,7 @@ local pending_hooks = {}            -- as set (keys only, meaningless values)
 -- profile the condition is evaluated for.
 local current_profile = nil
 
--- Cached set of all top-level mpv properties. Only used for extra validation.
+-- Cached set of all top-level mpv properities. Only used for extra validation.
 local property_set = {}
 for _, property in pairs(mp.get_property_native("property-list")) do
     property_set[property] = true
@@ -127,7 +128,7 @@ end
 
 local evil_magic = {}
 setmetatable(evil_magic, {
-    __index = function(_, key)
+    __index = function(table, key)
         -- interpret everything as property, unless it already exists as
         -- a non-nil global value
         local v = _G[key]
@@ -140,7 +141,7 @@ setmetatable(evil_magic, {
 
 p = {}
 setmetatable(p, {
-    __index = function(_, key)
+    __index = function(table, key)
         return magic_get(key)
     end,
 })
@@ -148,8 +149,6 @@ setmetatable(p, {
 local function compile_cond(name, s)
     local code, chunkname = "return " .. s, "profile " .. name .. " condition"
     local chunk, err
-    -- luacheck: push
-    -- luacheck: ignore setfenv loadstring
     if setfenv then -- lua 5.1
         chunk, err = loadstring(code, chunkname)
         if chunk then
@@ -158,7 +157,6 @@ local function compile_cond(name, s)
     else -- lua 5.2
         chunk, err = load(code, chunkname, "t", evil_magic)
     end
-    -- luacheck: pop
     if not chunk then
         msg.error("Profile '" .. name .. "' condition: " .. err)
         chunk = function() return false end
@@ -166,8 +164,8 @@ local function compile_cond(name, s)
     return chunk
 end
 
-local function load_profiles(profiles_property)
-    for _, v in ipairs(profiles_property) do
+local function load_profiles()
+    for i, v in ipairs(mp.get_property_native("profile-list")) do
         local cond = v["profile-cond"]
         if cond and #cond > 0 then
             local profile = {
@@ -184,24 +182,17 @@ local function load_profiles(profiles_property)
     end
 end
 
-mp.observe_property("profile-list", "native", function (_, profiles_property)
-    profiles = {}
-    watched_properties = {}
-    cached_properties = {}
-    properties_to_profiles = {}
-    mp.unobserve_property(on_property_change)
+load_profiles()
 
-    load_profiles(profiles_property)
-
-    if #profiles < 1 and mp.get_property("load-auto-profiles") == "auto" then
-        exit()
-        return
-    end
-
-    on_idle() -- re-evaluate all profiles immediately
-end)
+if #profiles < 1 and mp.get_property("load-auto-profiles") == "auto" then
+    -- make it exit immediately
+    _G.mp_event_loop = function() end
+    return
+end
 
 mp.register_idle(on_idle)
 for _, name in ipairs({"on_load", "on_preloaded", "on_before_start_file"}) do
     mp.add_hook(name, 50, on_hook)
 end
+
+on_idle() -- re-evaluate all profiles immediately
