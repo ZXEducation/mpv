@@ -268,15 +268,23 @@ static bool configure_lavrr(struct priv *p, bool verbose)
         mp_aframe_set_chmap(p->pool_fmt, &map_out);
 
     out_ch_layout = fudge_layout_conversion(p, in_ch_layout, out_ch_layout);
-
+#if LIBAVFORMAT_VERSION_MAJOR < 61
     // Real conversion; output is input to avrctx_out.
     av_opt_set_int(p->avrctx, "in_channel_layout",  in_ch_layout, 0);
     av_opt_set_int(p->avrctx, "out_channel_layout", out_ch_layout, 0);
+#else
+    AVChannelLayout in_layout, out_layout;
+    mp_chmap_to_av_layout(&in_layout, &in_lavc);
+    mp_chmap_to_av_layout(&out_layout, &out_lavc);
+    av_opt_set_chlayout(p->avrctx, "in_chlayout",  &in_layout, 0);
+    av_opt_set_chlayout(p->avrctx, "out_chlayout", &out_layout, 0);
+#endif
     av_opt_set_int(p->avrctx, "in_sample_rate",     p->in_rate, 0);
     av_opt_set_int(p->avrctx, "out_sample_rate",    p->out_rate, 0);
     av_opt_set_int(p->avrctx, "in_sample_fmt",      in_samplefmt, 0);
     av_opt_set_int(p->avrctx, "out_sample_fmt",     out_samplefmtp, 0);
 
+#if LIBAVFORMAT_VERSION_MAJOR < 61
     // Just needs the correct number of channels for deplanarization.
     struct mp_chmap fake_chmap;
     mp_chmap_set_unknown(&fake_chmap, map_out.num);
@@ -285,7 +293,12 @@ static bool configure_lavrr(struct priv *p, bool verbose)
         goto error;
     av_opt_set_int(p->avrctx_out, "in_channel_layout",  fake_out_ch_layout, 0);
     av_opt_set_int(p->avrctx_out, "out_channel_layout", fake_out_ch_layout, 0);
-
+#else
+    AVChannelLayout fake_layout;
+    av_channel_layout_default(&fake_layout, map_out.num);
+    av_opt_set_chlayout(p->avrctx_out, "in_chlayout", &fake_layout, 0);
+    av_opt_set_chlayout(p->avrctx_out, "out_chlayout", &fake_layout, 0);
+#endif
     av_opt_set_int(p->avrctx_out, "in_sample_fmt",      out_samplefmtp, 0);
     av_opt_set_int(p->avrctx_out, "out_sample_fmt",     out_samplefmt, 0);
     av_opt_set_int(p->avrctx_out, "in_sample_rate",     p->out_rate, 0);
