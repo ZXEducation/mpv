@@ -1714,17 +1714,11 @@ major = client_h_define.split('|')[0].split('<<')[0].strip('() ')
 minor = client_h_define.split('|')[1].strip('() ')
 client_api_version = major + '.' + minor + '.0'
 
-if win32
-    lib_dir = source_root + '/../build/windows/x64/install/lib'
-elif darwin
-    lib_dir = source_root + '/../build/macos/install/lib'
-endif
-
 # 定义库
-# cartrack = c.find_library('cartrack', dirs: lib_dir)
+cartrack = c.find_library('cartrack', dirs: source_root + '/deps')
 
-# # 添加到依赖
-# dependencies += cartrack
+# 添加到依赖
+dependencies += cartrack
 
 libmpv = library('mpv', sources, dependencies: dependencies, gnu_symbol_visibility: 'hidden',
                  version: client_api_version, include_directories: includedir,
