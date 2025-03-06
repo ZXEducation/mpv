@@ -23,6 +23,7 @@
 #include <libswresample/swresample.h>
 #include <libavformat/avformat.h>
 
+#include "audio/chmap_avchannel.h"
 #include "audio/aframe.h"
 #include "audio/fmt-conversion.h"
 #include "audio/format.h"
