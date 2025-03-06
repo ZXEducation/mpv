@@ -21,6 +21,7 @@
 #include <libavutil/channel_layout.h>
 #include <libavutil/mathematics.h>
 #include <libswresample/swresample.h>
+#include <libavformat/avformat.h>
 
 #include "audio/aframe.h"
 #include "audio/fmt-conversion.h"
