@@ -1275,23 +1275,23 @@ static int receive_frame(struct mp_filter *vd, struct mp_frame *out_frame) {
     }
   }
 
-  // if (enable_cartrack) {
-  //     AVFrame *frame = mp_image_to_av_frame(res);
-  //     if (frame) {
-  //         if (cartrack_process(frame)) {
-  //             for (int p = 0; p < MP_MAX_PLANES; p++) {
-  //                 av_buffer_unref(&res->bufs[p]);
-  //                 res->bufs[p] = frame->buf[p];
-  //             }
-  //             for (int i = 0; i < 4; i++) {
-  //                 res->planes[i] = frame->data[i];
-  //                 res->stride[i] = frame->linesize[i];
-  //             }
-  //             mp_image_set_size(res, frame->width, frame->height);
-  //             mp_image_setfmt(res, pixfmt2imgfmt(frame->format));
-  //         }
-  //     }
-  // }
+  if (enable_cartrack) {
+      AVFrame *frame = mp_image_to_av_frame(res);
+      if (frame) {
+          if (cartrack_process(frame)) {
+              for (int p = 0; p < MP_MAX_PLANES; p++) {
+                  av_buffer_unref(&res->bufs[p]);
+                  res->bufs[p] = frame->buf[p];
+              }
+              for (int i = 0; i < 4; i++) {
+                  res->planes[i] = frame->data[i];
+                  res->stride[i] = frame->linesize[i];
+              }
+              mp_image_set_size(res, frame->width, frame->height);
+              mp_image_setfmt(res, pixfmt2imgfmt(frame->format));
+          }
+      }
+  }
 
   if (!ctx->hwdec_notified) {
     if (ctx->use_hwdec) {
