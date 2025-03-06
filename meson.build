@@ -922,22 +922,24 @@ if features['jpeg']
     dependencies += jpeg
 endif
 
-libplacebo = dependency('libplacebo', version: '>=4.157.0', required: get_option('libplacebo'))
-features += {'libplacebo': libplacebo.found()}
-if features['libplacebo']
-    dependencies += libplacebo
-    sources += files('video/out/placebo/ra_pl.c',
-                     'video/out/placebo/utils.c')
-endif
+if win32
+    libplacebo = dependency('libplacebo', version: '>=4.157.0', required: get_option('libplacebo'))
+    features += {'libplacebo': libplacebo.found()}
+    if features['libplacebo']
+        dependencies += libplacebo
+        sources += files('video/out/placebo/ra_pl.c',
+                        'video/out/placebo/utils.c')
+    endif
 
-libplacebo_next = get_option('libplacebo-next').require(
-    features['libplacebo'] and libplacebo.version().version_compare('>=5.264.0'),
-    error_message: 'libplacebo v5.264.0+ was not found!',
-)
-features += {'libplacebo-next': libplacebo_next.allowed()}
-if features['libplacebo-next']
-    sources += files('video/out/vo_gpu_next.c',
-                     'video/out/gpu_next/context.c')
+    libplacebo_next = get_option('libplacebo-next').require(
+        features['libplacebo'] and libplacebo.version().version_compare('>=5.264.0'),
+        error_message: 'libplacebo v5.264.0+ was not found!',
+    )
+    features += {'libplacebo-next': libplacebo_next.allowed()}
+    if features['libplacebo-next']
+        sources += files('video/out/vo_gpu_next.c',
+                        'video/out/gpu_next/context.c')
+    endif
 endif
 
 sdl2_video = get_option('sdl2-video').require(
