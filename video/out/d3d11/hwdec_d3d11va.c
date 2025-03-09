@@ -149,6 +149,10 @@ static int mapper_init(struct ra_hwdec_mapper *mapper)
         for (int i = 0; i < desc.num_planes; i++)
             p->fmt[i] = desc.planes[i];
     } else {
+        // Minimal alignment requirement for NV12 and P010
+        mapper->dst_params.w = MP_ALIGN_UP(mapper->dst_params.w, 2);
+        mapper->dst_params.h = MP_ALIGN_UP(mapper->dst_params.h, 2);
+
         struct mp_image layout = {0};
         mp_image_set_params(&layout, &mapper->dst_params);
 
@@ -197,6 +201,8 @@ static int mapper_map(struct ra_hwdec_mapper *mapper)
     struct priv *p = mapper->priv;
     ID3D11Texture2D *tex = (void *)mapper->src->planes[0];
     int subresource = (intptr_t)mapper->src->planes[1];
+    D3D11_TEXTURE2D_DESC desc2d;
+    ID3D11Texture2D_GetDesc(tex, &desc2d);
 
     if (p->copy_tex) {
         ID3D11DeviceContext1_CopySubresourceRegion1(p->ctx,
@@ -213,9 +219,6 @@ static int mapper_map(struct ra_hwdec_mapper *mapper)
         // We no longer need the original texture after copying it.
         mp_image_unrefp(&mapper->src);
     } else {
-        D3D11_TEXTURE2D_DESC desc2d;
-        ID3D11Texture2D_GetDesc(tex, &desc2d);
-
         for (int i = 0; i < p->num_planes; i++) {
             // The video decode texture may include padding, so the size of the
             // ra_tex needs to be determined by the actual size of the Tex2D
