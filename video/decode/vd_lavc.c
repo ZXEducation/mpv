@@ -1212,7 +1212,15 @@ static int decode_frame(struct mp_filter *vd) {
   return ret;
 }
 
-bool (*mpv_cartrack_process)(AVFrame *) = NULL;
+#ifdef _WIN32
+#define MPV_EXPORT __declspec(dllexport)
+#elif defined(__GNUC__) || defined(__clang__)
+#define MPV_EXPORT __attribute__((visibility("default")))
+#else
+#define MPV_EXPORT
+#endif
+
+MPV_EXPORT bool (*mpv_cartrack_process)(AVFrame *) = NULL;
 extern bool enable_cartrack;
 
 static int receive_frame(struct mp_filter *vd, struct mp_frame *out_frame) {
