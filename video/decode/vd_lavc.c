@@ -1273,7 +1273,7 @@ MPV_EXPORT void mpv_set_cartrack_process(bool (*func)(AVFrame *)) {
   mpv_cartrack_process = func;
 }
 
-extern bool enable_cartrack;
+// extern bool enable_cartrack;
 
 static int receive_frame(struct mp_filter *vd, struct mp_frame *out_frame)
 {
@@ -1336,7 +1336,7 @@ static int receive_frame(struct mp_filter *vd, struct mp_frame *out_frame)
         }
     }
 
-    if (enable_cartrack && mpv_cartrack_process != NULL) {
+    if (mpv_cartrack_process != NULL) {
       AVFrame *frame = mp_image_to_av_frame(res);
       if (frame) {
           if (mpv_cartrack_process(frame)) {
