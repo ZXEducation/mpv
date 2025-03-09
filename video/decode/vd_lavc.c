@@ -1212,7 +1212,7 @@ static int decode_frame(struct mp_filter *vd) {
   return ret;
 }
 
-extern bool cartrack_process(AVFrame *frame);
+bool (*mpv_cartrack_process)(AVFrame *) = NULL;
 extern bool enable_cartrack;
 
 static int receive_frame(struct mp_filter *vd, struct mp_frame *out_frame) {
@@ -1275,7 +1275,7 @@ static int receive_frame(struct mp_filter *vd, struct mp_frame *out_frame) {
     }
   }
 
-  if (enable_cartrack) {
+  if (enable_cartrack && mpv_cartrack_process != NULL) {
       AVFrame *frame = mp_image_to_av_frame(res);
       if (frame) {
           if (cartrack_process(frame)) {
