@@ -1716,16 +1716,9 @@ major = client_h_define.split('|')[0].split('<<')[0].strip('() ')
 minor = client_h_define.split('|')[1].strip('() ')
 client_api_version = major + '.' + minor + '.0'
 
-# 定义库
-cartrack = c.find_library('cartrack', dirs: source_root + '/deps')
-
-# 添加到依赖
-dependencies += cartrack
-
 libmpv = library('mpv', sources, dependencies: dependencies, gnu_symbol_visibility: 'hidden',
                  version: client_api_version, include_directories: includedir,
                  install: get_option('libmpv'), build_by_default: get_option('libmpv'))
-
 
 if get_option('libmpv')
     pkg = import('pkgconfig')
