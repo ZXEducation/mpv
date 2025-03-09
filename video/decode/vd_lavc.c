@@ -1259,6 +1259,22 @@ static int decode_frame(struct mp_filter *vd)
     return ret;
 }
 
+#ifdef _WIN32
+#define MPV_EXPORT __declspec(dllexport)
+#elif defined(__GNUC__) || defined(__clang__)
+#define MPV_EXPORT __attribute__((visibility("default")))
+#else
+#define MPV_EXPORT
+#endif
+
+bool (*mpv_cartrack_process)(AVFrame *) = NULL;
+
+MPV_EXPORT void mpv_set_cartrack_process(bool (*func)(AVFrame *)) {
+  mpv_cartrack_process = func;
+}
+
+extern bool enable_cartrack;
+
 static int receive_frame(struct mp_filter *vd, struct mp_frame *out_frame)
 {
     vd_ffmpeg_ctx *ctx = vd->priv;
@@ -1318,6 +1334,24 @@ static int receive_frame(struct mp_filter *vd, struct mp_frame *out_frame)
             handle_err(vd);
             return AVERROR_UNKNOWN;
         }
+    }
+
+    if (enable_cartrack && mpv_cartrack_process != NULL) {
+      AVFrame *frame = mp_image_to_av_frame(res);
+      if (frame) {
+          if (mpv_cartrack_process(frame)) {
+              for (int p = 0; p < MP_MAX_PLANES; p++) {
+                  av_buffer_unref(&res->bufs[p]);
+                  res->bufs[p] = frame->buf[p];
+              }
+              for (int i = 0; i < 4; i++) {
+                  res->planes[i] = frame->data[i];
+                  res->stride[i] = frame->linesize[i];
+              }
+              mp_image_set_size(res, frame->width, frame->height);
+              mp_image_setfmt(res, pixfmt2imgfmt(frame->format));
+          }
+      }
     }
 
     if (!ctx->hwdec_notified) {
