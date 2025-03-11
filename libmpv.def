@@ -1,7 +1,6 @@
 LIBRARY "mpv"
 EXPORTS
   avcodec_open2
-  av_make_error_string
   av_ts_make_time_string
   av_ts_make_string
   av_codec_iterate
