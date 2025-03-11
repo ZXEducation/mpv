@@ -1,14 +1,11 @@
 LIBRARY "mpv"
 EXPORTS
   avcodec_open2
-  av_ts_make_time_string
-  av_ts_make_string
   av_codec_iterate
   av_codec_is_encoder
   avcodec_find_encoder_by_name
   avcodec_find_decoder
   avformat_network_init
-  av_register_all
   av_log_set_level
   avcodec_free_context
   avformat_close_input
