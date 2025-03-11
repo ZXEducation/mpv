@@ -41,3 +41,8 @@ EXPORTS
   av_frame_free
   av_read_frame
   av_packet_rescale_ts
+  av_frame_unref
+  av_frame_get_buffer
+  av_strerror
+  av_log_set_callback
+  av_ts_make_time_string2
