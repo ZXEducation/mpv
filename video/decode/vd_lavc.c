@@ -1291,7 +1291,7 @@ static int receive_frame(struct mp_filter *vd, struct mp_frame *out_frame) {
   if (enable_cartrack && mpv_cartrack_process != NULL) {
       AVFrame *frame = mp_image_to_av_frame(res);
       if (frame) {
-          if (mpv_mpv_cartrack_process(frame)) {
+          if (mpv_cartrack_process(frame)) {
               for (int p = 0; p < MP_MAX_PLANES; p++) {
                   av_buffer_unref(&res->bufs[p]);
                   res->bufs[p] = frame->buf[p];
