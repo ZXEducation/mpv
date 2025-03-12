@@ -23,8 +23,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 
-#include <libplacebo/utils/libav.h>
-
 #include "common/common.h"
 #include "options/options.h"
 #include "video/fmt-conversion.h"
@@ -114,8 +112,8 @@ static int reconfig2(struct vo *vo, struct mp_image *img)
     encoder->width = width;
     encoder->height = height;
     encoder->pix_fmt = pix_fmt;
-    encoder->colorspace = pl_system_to_av(params->repr.sys);
-    encoder->color_range = pl_levels_to_av(params->repr.levels);
+    encoder->colorspace = mp_csp_to_avcol_spc(params->color.space);
+    encoder->color_range = mp_csp_levels_to_avcol_range(params->color.levels);
 
     AVRational tb;
 
@@ -194,7 +192,7 @@ static void draw_frame(struct vo *vo, struct vo_frame *voframe)
         return;
 
     // Lock for shared timestamp fields.
-    mp_mutex_lock(&ectx->lock);
+    pthread_mutex_lock(&ectx->lock);
 
     double pts = mpi->pts;
     double outpts = pts;
@@ -214,6 +212,8 @@ static void draw_frame(struct vo *vo, struct vo_frame *voframe)
         outpts = pts + ectx->discontinuity_pts_offset;
     }
 
+    outpts += encoder_get_offset(enc);
+
     if (!enc->options->rawts) {
         // calculate expected pts of next video frame
         double timeunit = av_q2d(avc->time_base);
@@ -224,7 +224,7 @@ static void draw_frame(struct vo *vo, struct vo_frame *voframe)
             ectx->next_in_pts = nextpts;
     }
 
-    mp_mutex_unlock(&ectx->lock);
+    pthread_mutex_unlock(&ectx->lock);
 
     AVFrame *frame = mp_image_to_av_frame(mpi);
     MP_HANDLE_OOM(frame);

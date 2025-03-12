@@ -79,7 +79,7 @@ EOF
         video-bitrate
         video-codec
         video-format
-        video-params/aspect
+        video-aspect
         container-fps
         width
         height

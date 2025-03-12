@@ -15,11 +15,10 @@
  * License along with mpv.  If not, see <http://www.gnu.org/licenses/>.
  */
 
-#include <assert.h>
-#include <errno.h>
-#include <math.h>
-#include <stdbool.h>
 #include <stddef.h>
+#include <stdbool.h>
+#include <errno.h>
+#include <assert.h>
 
 #include "mpv_talloc.h"
 
@@ -129,7 +128,7 @@ bool get_ab_loop_times(struct MPContext *mpctx, double t[2])
     t[0] = opts->ab_loop[0];
     t[1] = opts->ab_loop[1];
 
-    if (!mpctx->remaining_ab_loops)
+    if (!opts->ab_loop_count)
         return false;
 
     if (t[0] == MP_NOPTS_VALUE || t[1] == MP_NOPTS_VALUE || t[0] == t[1])
@@ -148,12 +147,7 @@ double get_track_seek_offset(struct MPContext *mpctx, struct track *track)
         if (track->type == STREAM_AUDIO)
             return -opts->audio_delay;
         if (track->type == STREAM_SUB)
-        {
-            for (int n = 0; n < num_ptracks[STREAM_SUB]; n++) {
-                if (mpctx->current_track[n][STREAM_SUB] == track)
-                    return -opts->subs_shared->sub_delay[n];
-            }
-        }
+            return -opts->subs_rend->sub_delay;
     }
     return 0;
 }
@@ -192,18 +186,17 @@ void update_vo_playback_state(struct MPContext *mpctx)
 {
     if (mpctx->video_out && mpctx->video_out->config_ok) {
         struct voctrl_playback_state oldstate = mpctx->vo_playback_state;
-        double pos = get_current_pos_ratio(mpctx, false);
         struct voctrl_playback_state newstate = {
-            .taskbar_progress = mpctx->opts->vo->taskbar_progress && pos >= 0,
+            .taskbar_progress = mpctx->opts->vo->taskbar_progress,
             .playing = mpctx->playing,
             .paused = mpctx->paused,
-            .position = pos > 0 ? lrint(pos * UINT8_MAX) : 0,
+            .percent_pos = get_percent_pos(mpctx),
         };
 
         if (oldstate.taskbar_progress != newstate.taskbar_progress ||
             oldstate.playing != newstate.playing ||
             oldstate.paused != newstate.paused ||
-            oldstate.position != newstate.position)
+            oldstate.percent_pos != newstate.percent_pos)
         {
             // Don't update progress bar if it was and still is hidden
             if ((oldstate.playing && oldstate.taskbar_progress) ||
@@ -254,8 +247,7 @@ void error_on_track(struct MPContext *mpctx, struct track *track)
     if (track->type == STREAM_VIDEO)
         MP_INFO(mpctx, "Video: no video\n");
     if (mpctx->opts->stop_playback_on_init_failure ||
-        (!mpctx->current_track[0][STREAM_AUDIO] &&
-         !mpctx->current_track[0][STREAM_VIDEO]))
+        !(mpctx->vo_chain || mpctx->ao_chain))
     {
         if (!mpctx->stop_play)
             mpctx->stop_play = PT_ERROR;
@@ -268,23 +260,21 @@ void error_on_track(struct MPContext *mpctx, struct track *track)
 int stream_dump(struct MPContext *mpctx, const char *source_filename)
 {
     struct MPOpts *opts = mpctx->opts;
-    bool ok = false;
-
     stream_t *stream = stream_create(source_filename,
                                      STREAM_ORIGIN_DIRECT | STREAM_READ,
                                      mpctx->playback_abort, mpctx->global);
-    if (!stream || stream->is_directory)
-        goto done;
+    if (!stream)
+        return -1;
 
     int64_t size = stream_get_size(stream);
 
     FILE *dest = fopen(opts->stream_dump, "wb");
     if (!dest) {
         MP_ERR(mpctx, "Error opening dump file: %s\n", mp_strerror(errno));
-        goto done;
+        return -1;
     }
 
-    ok = true;
+    bool ok = true;
 
     while (mpctx->stop_play == KEEP_PLAYING && ok) {
         if (!opts->quiet && ((stream->pos / (1024 * 1024)) % 2) == 1) {
@@ -304,7 +294,6 @@ int stream_dump(struct MPContext *mpctx, const char *source_filename)
     }
 
     ok &= fclose(dest) == 0;
-done:
     free_stream(stream);
     return ok ? 0 : -1;
 }
@@ -328,7 +317,7 @@ void merge_playlist_files(struct playlist *pl)
         edl = talloc_strdup_append_buffer(edl, e->filename);
     }
     playlist_clear(pl);
-    playlist_append_file(pl, edl);
+    playlist_add_file(pl, edl);
     talloc_free(edl);
 }
 
@@ -342,15 +331,4 @@ const char *mp_status_str(enum playback_status st)
     case STATUS_EOF:        return "eof";
     default:                return "bug";
     }
-}
-
-bool str_in_list(bstr str, char **list)
-{
-    if (!list)
-        return false;
-    while (*list) {
-        if (!bstrcasecmp0(str, *list++))
-            return true;
-    }
-    return false;
 }

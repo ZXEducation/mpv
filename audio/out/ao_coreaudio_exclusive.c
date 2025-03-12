@@ -1,5 +1,5 @@
 /*
- * CoreAudio audio output driver for macOS
+ * CoreAudio audio output driver for Mac OS X
  *
  * original copyright (C) Timothy J. Wood - Aug 2000
  * ported to MPlayer libao2 by Dan Christiansen
@@ -28,13 +28,11 @@
  */
 
 /*
- * The macOS CoreAudio framework doesn't mesh as simply as some
+ * The MacOS X CoreAudio framework doesn't mesh as simply as some
  * simpler frameworks do.  This is due to the fact that CoreAudio pulls
  * audio samples rather than having them pushed at it (which is nice
  * when you are wanting to do good buffering of audio).
  */
-
-#include <stdatomic.h>
 
 #include <CoreAudio/HostTime.h>
 
@@ -45,6 +43,7 @@
 #include "internal.h"
 #include "audio/format.h"
 #include "osdep/timer.h"
+#include "osdep/atomic.h"
 #include "options/m_option.h"
 #include "common/msg.h"
 #include "audio/out/ao_coreaudio_chmap.h"
@@ -79,7 +78,7 @@ struct priv {
 
     atomic_bool reload_requested;
 
-    uint64_t hw_latency_ns;
+    uint32_t hw_latency_us;
 };
 
 static OSStatus property_listener_cb(
@@ -114,7 +113,7 @@ static OSStatus enable_property_listener(struct ao *ao, bool enabled)
                             kAudioHardwarePropertyDevices};
     AudioDeviceID devs[] = {p->device,
                             kAudioObjectSystemObject};
-    static_assert(MP_ARRAY_SIZE(selectors) == MP_ARRAY_SIZE(devs), "");
+    assert(MP_ARRAY_SIZE(selectors) == MP_ARRAY_SIZE(devs));
 
     OSStatus status = noErr;
     for (int n = 0; n < MP_ARRAY_SIZE(devs); n++) {
@@ -177,11 +176,11 @@ static OSStatus render_cb_compressed(
         return kAudioHardwareUnspecifiedError;
     }
 
-    int64_t end = mp_time_ns();
-    end += p->hw_latency_ns + ca_get_latency(ts)
-        + ca_frames_to_ns(ao, pseudo_frames);
+    int64_t end = mp_time_us();
+    end += p->hw_latency_us + ca_get_latency(ts)
+        + ca_frames_to_us(ao, pseudo_frames);
 
-    ao_read_data(ao, &buf.mData, pseudo_frames, end, NULL, true, true);
+    ao_read_data(ao, &buf.mData, pseudo_frames, end);
 
     if (p->spdif_hack)
         bad_hack_mygodwhy(buf.mData, pseudo_frames * ao->channels.num);
@@ -384,8 +383,8 @@ static int init(struct ao *ao)
         MP_WARN(ao, "Using spdif passthrough hack. This could produce noise.\n");
     }
 
-    p->hw_latency_ns = ca_get_device_latency_ns(ao, p->device);
-    MP_VERBOSE(ao, "base latency: %lld nanoseconds\n", p->hw_latency_ns);
+    p->hw_latency_us = ca_get_device_latency_us(ao, p->device);
+    MP_VERBOSE(ao, "base latency: %d microseconds\n", (int)p->hw_latency_us);
 
     err = enable_property_listener(ao, true);
     CHECK_CA_ERROR("cannot install format change listener during init");

@@ -92,7 +92,6 @@ struct xvctx {
     int Shmem_Flag;
     XShmSegmentInfo Shminfo[MAX_BUFFERS];
     int Shm_Warned_Slow;
-    struct mp_image_params dst_params;
 };
 
 #define MP_FOURCC(a,b,c,d) ((a) | ((b)<<8) | ((c)<<16) | ((unsigned)(d)<<24))
@@ -402,7 +401,7 @@ static void read_xv_csp(struct vo *vo)
     ctx->cached_csp = 0;
     int bt709_enabled;
     if (xv_get_eq(vo, ctx->xv_port, "bt_709", &bt709_enabled))
-        ctx->cached_csp = bt709_enabled == 100 ? PL_COLOR_SYSTEM_BT_709 : PL_COLOR_SYSTEM_BT_601;
+        ctx->cached_csp = bt709_enabled == 100 ? MP_CSP_BT_709 : MP_CSP_BT_601;
 }
 
 
@@ -466,6 +465,8 @@ static int reconfig(struct vo *vo, struct mp_image_params *params)
     struct xvctx *ctx = vo->priv;
     int i;
 
+    mp_image_unrefp(&ctx->original_image);
+
     ctx->image_height = params->h;
     ctx->image_width  = params->w;
     ctx->image_format = params->imgfmt;
@@ -520,16 +521,9 @@ static int reconfig(struct vo *vo, struct mp_image_params *params)
     ctx->current_buf = 0;
     ctx->current_ip_buf = 0;
 
-    int is_709 = params->repr.sys == PL_COLOR_SYSTEM_BT_709;
+    int is_709 = params->color.space == MP_CSP_BT_709;
     xv_set_eq(vo, ctx->xv_port, "bt_709", is_709 * 200 - 100);
     read_xv_csp(vo);
-
-    ctx->dst_params = *params;
-    if (ctx->cached_csp)
-        ctx->dst_params.repr.sys = ctx->cached_csp;
-    mp_mutex_lock(&vo->params_mutex);
-    vo->target_params = &ctx->dst_params;
-    mp_mutex_unlock(&vo->params_mutex);
 
     resize(vo);
 
@@ -660,7 +654,7 @@ static struct mp_image get_xv_buffer(struct vo *vo, int buf_index)
     if (vo->params) {
         struct mp_image_params params = *vo->params;
         if (ctx->cached_csp)
-            params.repr.sys = ctx->cached_csp;
+            params.color.space = ctx->cached_csp;
         mp_image_set_attributes(&img, &params);
     }
 
@@ -678,7 +672,7 @@ static void wait_for_completion(struct vo *vo, int max_outstanding)
                         " for XShm completion events...\n");
                 ctx->Shm_Warned_Slow = 1;
             }
-            mp_sleep_ns(MP_TIME_MS_TO_NS(1));
+            mp_sleep_us(1000);
             vo_x11_check_events(vo);
         }
     }
@@ -708,7 +702,8 @@ static void get_vsync(struct vo *vo, struct vo_vsync_info *info)
         present_sync_get_info(x11->present, info);
 }
 
-static void draw_frame(struct vo *vo, struct vo_frame *frame)
+// Note: REDRAW_FRAME can call this with NULL.
+static void draw_image(struct vo *vo, mp_image_t *mpi)
 {
     struct xvctx *ctx = vo->priv;
 
@@ -718,17 +713,19 @@ static void draw_frame(struct vo *vo, struct vo_frame *frame)
         return;
 
     struct mp_image xv_buffer = get_xv_buffer(vo, ctx->current_buf);
-    if (frame->current) {
-        mp_image_copy(&xv_buffer, frame->current);
+    if (mpi) {
+        mp_image_copy(&xv_buffer, mpi);
     } else {
         mp_image_clear(&xv_buffer, 0, 0, xv_buffer.w, xv_buffer.h);
     }
 
     struct mp_osd_res res = osd_res_from_image_params(vo->params);
-    osd_draw_on_image(vo->osd, res, frame->current ? frame->current->pts : 0, 0, &xv_buffer);
+    osd_draw_on_image(vo->osd, res, mpi ? mpi->pts : 0, 0, &xv_buffer);
 
-    if (frame->current != ctx->original_image)
-        ctx->original_image = frame->current;
+    if (mpi != ctx->original_image) {
+        talloc_free(ctx->original_image);
+        ctx->original_image = mpi;
+    }
 }
 
 static int query_format(struct vo *vo, int format)
@@ -750,6 +747,8 @@ static void uninit(struct vo *vo)
 {
     struct xvctx *ctx = vo->priv;
     int i;
+
+    talloc_free(ctx->original_image);
 
     if (ctx->ai)
         XvFreeAdaptorInfo(ctx->ai);
@@ -866,17 +865,21 @@ static int preinit(struct vo *vo)
                 "You should fix your graphics drivers, or not force the xv VO.\n");
     return 0;
 
-error:
+  error:
     uninit(vo);                 // free resources
     return -1;
 }
 
 static int control(struct vo *vo, uint32_t request, void *data)
 {
+    struct xvctx *ctx = vo->priv;
     switch (request) {
     case VOCTRL_SET_PANSCAN:
         resize(vo);
         return VO_TRUE;
+    case VOCTRL_REDRAW_FRAME:
+        draw_image(vo, ctx->original_image);
+        return true;
     }
     int events = 0;
     int r = vo_x11_control(vo, &events, request, data);
@@ -895,7 +898,7 @@ const struct vo_driver video_out_xv = {
     .query_format = query_format,
     .reconfig = reconfig,
     .control = control,
-    .draw_frame = draw_frame,
+    .draw_image = draw_image,
     .flip_page = flip_page,
     .get_vsync = get_vsync,
     .wakeup = vo_x11_wakeup,
@@ -923,6 +926,7 @@ const struct vo_driver video_out_xv = {
             {"auto", CK_METHOD_AUTOPAINT})},
         {"colorkey", OPT_INT(colorkey)},
         {"buffers", OPT_INT(cfg_buffers), M_RANGE(1, MAX_BUFFERS)},
+        {"no-colorkey", OPT_REMOVED("use ck-method=none instead")},
         {0}
     },
     .options_prefix = "xv",

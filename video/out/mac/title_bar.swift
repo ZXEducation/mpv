@@ -19,14 +19,16 @@ import Cocoa
 
 class TitleBar: NSVisualEffectView {
     unowned var common: Common
-    var option: OptionHelper { return common.option }
+    var mpv: MPVHelper? { get { return common.mpv } }
 
-    var systemBar: NSView? { return common.window?.standardWindowButton(.closeButton)?.superview }
+    var systemBar: NSView? {
+        get { return common.window?.standardWindowButton(.closeButton)?.superview }
+    }
     static var height: CGFloat {
-        return NSWindow.frameRect(forContentRect: CGRect.zero, styleMask: .titled).size.height
+        get { return NSWindow.frameRect(forContentRect: CGRect.zero, styleMask: .titled).size.height }
     }
     var buttons: [NSButton] {
-        return ([.closeButton, .miniaturizeButton, .zoomButton] as [NSWindow.ButtonType]).compactMap { common.window?.standardWindowButton($0) }
+        get { return ([.closeButton, .miniaturizeButton, .zoomButton] as [NSWindow.ButtonType]).compactMap { common.window?.standardWindowButton($0) } }
     }
 
     override var material: NSVisualEffectView.Material {
@@ -34,16 +36,22 @@ class TitleBar: NSVisualEffectView {
         set {
             super.material = newValue
             // fix for broken deprecated materials
-            if material == .light || material == .dark || material == .mediumLight || material == .ultraDark {
+            if material == .light || material == .dark {
+                state = .active
+            } else if #available(macOS 10.11, *),
+                      material == .mediumLight || material == .ultraDark
+            {
                 state = .active
             } else {
                 state = .followsWindowActiveState
             }
+
         }
     }
 
     init(frame: NSRect, window: NSWindow, common com: Common) {
-        let f = NSRect(x: 0, y: frame.size.height - TitleBar.height, width: frame.size.width, height: TitleBar.height + 1)
+        let f = NSMakeRect(0, frame.size.height - TitleBar.height,
+                           frame.size.width, TitleBar.height)
         common = com
         super.init(frame: f)
         buttons.forEach { $0.isHidden = true }
@@ -58,9 +66,9 @@ class TitleBar: NSVisualEffectView {
         window.contentView?.addSubview(self, positioned: .above, relativeTo: nil)
         window.titlebarAppearsTransparent = true
         window.styleMask.insert(.fullSizeContentView)
-        set(appearance: Int(option.mac.macos_title_bar_appearance))
-        set(material: Int(option.mac.macos_title_bar_material))
-        set(color: option.mac.macos_title_bar_color)
+        set(appearance: Int(mpv?.macOpts.macos_title_bar_appearance ?? 0))
+        set(material: Int(mpv?.macOpts.macos_title_bar_material ?? 0))
+        set(color: mpv?.macOpts.macos_title_bar_color ?? "#00000000")
     }
 
     required init?(coder: NSCoder) {
@@ -127,7 +135,7 @@ class TitleBar: NSVisualEffectView {
         let loc = common.view?.convert(window.mouseLocationOutsideOfEventStream, from: nil)
 
         buttons.forEach { $0.isHidden = false }
-        NSAnimationContext.runAnimationGroup({ (context) in
+        NSAnimationContext.runAnimationGroup({ (context) -> Void in
             context.duration = 0.20
             systemBar?.animator().alphaValue = 1
             if !window.isInFullscreen && !window.isAnimating {
@@ -150,7 +158,7 @@ class TitleBar: NSVisualEffectView {
             isHidden = true
             return
         }
-        NSAnimationContext.runAnimationGroup({ (context) in
+        NSAnimationContext.runAnimationGroup({ (context) -> Void in
             context.duration = duration
             systemBar?.animator().alphaValue = 0
             animator().alphaValue = 0
@@ -171,48 +179,77 @@ class TitleBar: NSVisualEffectView {
         switch string {
         case "1", "aqua":
             return NSAppearance(named: .aqua)
-        case "2", "darkAqua":
-            return NSAppearance(named: .darkAqua)
         case "3", "vibrantLight":
             return NSAppearance(named: .vibrantLight)
         case "4", "vibrantDark":
             return NSAppearance(named: .vibrantDark)
-        case "5", "aquaHighContrast":
-            return NSAppearance(named: .accessibilityHighContrastAqua)
-        case "6", "darkAquaHighContrast":
-            return NSAppearance(named: .accessibilityHighContrastDarkAqua)
-        case "7", "vibrantLightHighContrast":
-            return NSAppearance(named: .accessibilityHighContrastVibrantLight)
-        case "8", "vibrantDarkHighContrast":
-            return NSAppearance(named: .accessibilityHighContrastVibrantDark)
-        case "0", "auto":
-            return nil
-        default:
-            return nil
+        default: break
         }
+
+        if #available(macOS 10.14, *) {
+            switch string {
+            case "2", "darkAqua":
+                return NSAppearance(named: .darkAqua)
+            case "5", "aquaHighContrast":
+                return NSAppearance(named: .accessibilityHighContrastAqua)
+            case "6", "darkAquaHighContrast":
+                return NSAppearance(named: .accessibilityHighContrastDarkAqua)
+            case "7", "vibrantLightHighContrast":
+                return NSAppearance(named: .accessibilityHighContrastVibrantLight)
+            case "8", "vibrantDarkHighContrast":
+                return NSAppearance(named: .accessibilityHighContrastVibrantDark)
+            case "0", "auto": fallthrough
+            default:
+#if HAVE_MACOS_10_14_FEATURES
+                return nil
+#else
+                break
+#endif
+            }
+        }
+
+        let style = UserDefaults.standard.string(forKey: "AppleInterfaceStyle")
+        return appearanceFrom(string: style == nil ? "aqua" : "vibrantDark")
     }
 
     func materialFrom(string: String) -> NSVisualEffectView.Material {
         switch string {
-        case "0", "titlebar":               return .titlebar
-        case "1", "selection":              return .selection
-        case "2", "menu":                   return .menu
-        case "3", "popover":                return .popover
-        case "4", "sidebar":                return .sidebar
-        case "5", "headerView":             return .headerView
-        case "6", "sheet":                  return .sheet
-        case "7", "windowBackground":       return .windowBackground
-        case "8", "hudWindow":              return .hudWindow
-        case "9", "fullScreen":             return .fullScreenUI
-        case "10", "toolTip":               return .toolTip
-        case "11", "contentBackground":     return .contentBackground
-        case "12", "underWindowBackground": return .underWindowBackground
-        case "13", "underPageBackground":   return .underPageBackground
-        case "14", "dark":                  return .dark
-        case "15", "light":                 return .light
-        case "16", "mediumLight":           return .mediumLight
-        case "17", "ultraDark":             return .ultraDark
-        default:                            return .titlebar
+        case "1",  "selection": return .selection
+        case "0",  "titlebar":  return .titlebar
+        case "14", "dark":      return .dark
+        case "15", "light":     return .light
+        default:                break
         }
+
+#if HAVE_MACOS_10_11_FEATURES
+        if #available(macOS 10.11, *) {
+            switch string {
+            case "2,", "menu":          return .menu
+            case "3",  "popover":       return .popover
+            case "4",  "sidebar":       return .sidebar
+            case "16", "mediumLight":   return .mediumLight
+            case "17", "ultraDark":     return .ultraDark
+            default:                    break
+            }
+        }
+#endif
+#if HAVE_MACOS_10_14_FEATURES
+        if #available(macOS 10.14, *) {
+            switch string {
+            case "5,", "headerView":            return .headerView
+            case "6",  "sheet":                 return .sheet
+            case "7",  "windowBackground":      return .windowBackground
+            case "8",  "hudWindow":             return .hudWindow
+            case "9",  "fullScreen":            return .fullScreenUI
+            case "10", "toolTip":               return .toolTip
+            case "11", "contentBackground":     return .contentBackground
+            case "12", "underWindowBackground": return .underWindowBackground
+            case "13", "underPageBackground":   return .underPageBackground
+            default:                            break
+            }
+        }
+#endif
+
+        return .titlebar
     }
 }

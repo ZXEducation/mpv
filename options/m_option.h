@@ -25,7 +25,6 @@
 
 #include "misc/bstr.h"
 #include "audio/chmap.h"
-#include "common/common.h"
 
 // m_option allows to parse, print and copy data of various types.
 
@@ -67,8 +66,6 @@ extern const m_option_type_t m_option_type_channels;
 extern const m_option_type_t m_option_type_aspect;
 extern const m_option_type_t m_option_type_obj_settings_list;
 extern const m_option_type_t m_option_type_node;
-extern const m_option_type_t m_option_type_rect;
-extern const m_option_type_t m_option_type_cycle_dir;
 
 // Used internally by m_config.c
 extern const m_option_type_t m_option_type_alias;
@@ -106,7 +103,6 @@ struct m_geometry {
 
 void m_geometry_apply(int *xpos, int *ypos, int *widw, int *widh,
                       int scrw, int scrh, struct m_geometry *gm);
-void m_rect_apply(struct mp_rect *rc, int w, int h, struct m_geometry *gm);
 
 struct m_channels {
     bool set : 1;
@@ -162,8 +158,6 @@ struct m_obj_list {
     void (*print_help_list)(struct mp_log *log);
     // Callback to print help for _unknown_ entries with "vf=entry=help"
     void (*print_unknown_entry_help)(struct mp_log *log, const char *name);
-    // Get lavfi filters for option-info/[av]f/choices.
-    const char **(*get_lavfi_filters)(void *talloc_ctx);
 };
 
 // Find entry by name
@@ -192,20 +186,15 @@ struct m_opt_choice_alternatives {
 const char *m_opt_choice_str(const struct m_opt_choice_alternatives *choices,
                              int value);
 
+// Validator function signatures. Required to properly type the param value.
 typedef int (*m_opt_generic_validate_fn)(struct mp_log *log, const m_option_t *opt,
                                          struct bstr name, void *value);
 
-#define OPT_FUNC(name) name
-#define OPT_FUNC_IN(name, suffix) name ## _ ## suffix
-#define OPT_VALIDATE_FUNC(func, value_type, suffix) \
-int OPT_FUNC(func)(struct mp_log *log, const m_option_t *opt, \
-                   struct bstr name, value_type value); \
-static inline int OPT_FUNC_IN(func, suffix)(struct mp_log *log, const m_option_t *opt, \
-                                            struct bstr name, void *value) { \
-    return OPT_FUNC(func)(log, opt, name, value); \
-} \
-int OPT_FUNC(func)(struct mp_log *log, const m_option_t *opt, \
-                   struct bstr name, value_type value)
+typedef int (*m_opt_string_validate_fn)(struct mp_log *log, const m_option_t *opt,
+                                        struct bstr name, const char **value);
+typedef int (*m_opt_int_validate_fn)(struct mp_log *log, const m_option_t *opt,
+                                     struct bstr name, const int *value);
+
 
 // m_option.priv points to this if OPT_SUBSTRUCT is used
 struct m_sub_options {
@@ -263,11 +252,6 @@ union m_option_value {
     struct m_geometry size_box;
     struct m_channels channels;
 };
-
-// Keep fully zeroed instance of m_option_value to use as a default value, before
-// any specific union member is used. C standard says that `= {0}` activates and
-// initializes only the first member of the union, leaving padding bits undefined.
-static const union m_option_value m_option_value_default;
 
 ////////////////////////////////////////////////////////////////////////////
 
@@ -387,12 +371,6 @@ struct m_option {
     // See \ref OptionFlags.
     unsigned int flags;
 
-    // Always force an option update even if the written value does not change.
-    bool force_update;
-
-    // If the option is an alias, use the prefix of sub option.
-    bool alias_use_prefix;
-
     int offset;
 
     // Most numeric types restrict the range to [min, max] if min<max (this
@@ -455,26 +433,20 @@ char *format_file_size(int64_t size);
 #define UPDATE_HWDEC            (1 << 20) // --hwdec
 #define UPDATE_DVB_PROG         (1 << 21) // some --dvbin-...
 #define UPDATE_SUB_HARD         (1 << 22) // subtitle opts. that need full reinit
-#define UPDATE_SUB_EXTS         (1 << 23) // update internal list of sub exts
-#define UPDATE_VIDEO            (1 << 24) // force redraw if needed
-#define UPDATE_VO               (1 << 25) // reinit the VO
-#define UPDATE_OPT_LAST         (1 << 25)
+#define UPDATE_OPT_LAST         (1 << 22)
 
 // All bits between _FIRST and _LAST (inclusive)
 #define UPDATE_OPTS_MASK \
     (((UPDATE_OPT_LAST << 1) - 1) & ~(unsigned)(UPDATE_OPT_FIRST - 1))
 
 // type_float/type_double: string "default" is parsed as NaN (and reverse)
-#define M_OPT_DEFAULT_NAN       (1 << 26)
+#define M_OPT_DEFAULT_NAN       (1 << 25)
 
 // type time: string "no" maps to MP_NOPTS_VALUE (if unset, NOPTS is rejected)
-#define M_OPT_ALLOW_NO          (1 << 27)
+#define M_OPT_ALLOW_NO          (1 << 26)
 
 // type channels: disallow "auto" (still accept ""), limit list to at most 1 item.
-#define M_OPT_CHANNELS_LIMITED  (1 << 28)
-
-// type_float/type_double: controls if pretty print should trim trailing zeros
-#define M_OPT_FIXED_LEN_PRINT   (1 << 29)
+#define M_OPT_CHANNELS_LIMITED  (1 << 27)
 
 // Like M_OPT_TYPE_OPTIONAL_PARAM.
 #define M_OPT_OPTIONAL_PARAM    (1 << 30)
@@ -549,16 +521,12 @@ static inline char *m_option_print(const m_option_t *opt, const void *val_ptr)
 }
 
 static inline char *m_option_pretty_print(const m_option_t *opt,
-                                          const void *val_ptr,
-                                          bool fixed_len)
+                                          const void *val_ptr)
 {
-    m_option_t o = *opt;
-    if (fixed_len)
-        o.flags |= M_OPT_FIXED_LEN_PRINT;
     if (opt->type->pretty_print)
-        return opt->type->pretty_print(&o, val_ptr);
+        return opt->type->pretty_print(opt, val_ptr);
     else
-        return m_option_print(&o, val_ptr);
+        return m_option_print(opt, val_ptr);
 }
 
 // Helper around \ref m_option_type::copy.
@@ -685,9 +653,6 @@ extern const char m_option_path_separator;
 #define OPT_SIZE_BOX(field) \
     OPT_TYPED_FIELD(m_option_type_size_box, struct m_geometry, field)
 
-#define OPT_RECT(field) \
-    OPT_TYPED_FIELD(m_option_type_rect, struct m_geometry, field)
-
 #define OPT_TRACKCHOICE(field) \
     OPT_CHOICE(field, {"no", -2}, {"auto", -1}), \
     M_RANGE(0, 8190)
@@ -696,7 +661,7 @@ extern const char m_option_path_separator;
     OPT_TYPED_FIELD(m_option_type_msglevels, char **, field)
 
 #define OPT_ASPECT(field) \
-    OPT_TYPED_FIELD(m_option_type_aspect, double, field)
+    OPT_TYPED_FIELD(m_option_type_aspect, float, field)
 
 #define OPT_IMAGEFORMAT(field) \
     OPT_TYPED_FIELD(m_option_type_imgfmt, int, field)
@@ -707,17 +672,15 @@ extern const char m_option_path_separator;
 #define OPT_CHANNELS(field) \
     OPT_TYPED_FIELD(m_option_type_channels, struct m_channels, field)
 
-#define OPT_INT_VALIDATE_FUNC(func) OPT_VALIDATE_FUNC(func, const int *, int)
-
 #define OPT_INT_VALIDATE(field, validate_fn) \
     OPT_TYPED_FIELD(m_option_type_int, int, field), \
-    .validate = OPT_FUNC_IN(validate_fn, int)
-
-#define OPT_STRING_VALIDATE_FUNC(func) OPT_VALIDATE_FUNC(func, const char **, str)
+    .validate = (m_opt_generic_validate_fn) \
+        MP_EXPECT_TYPE(m_opt_int_validate_fn, validate_fn)
 
 #define OPT_STRING_VALIDATE(field, validate_fn) \
     OPT_TYPED_FIELD(m_option_type_string, char*, field), \
-    .validate = OPT_FUNC_IN(validate_fn, str)
+    .validate = (m_opt_generic_validate_fn) \
+        MP_EXPECT_TYPE(m_opt_string_validate_fn, validate_fn)
 
 #define M_CHOICES(...) \
     .priv = (void *)&(const struct m_opt_choice_alternatives[]){ __VA_ARGS__, {0}}

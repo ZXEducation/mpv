@@ -31,10 +31,8 @@
 
 #if HAVE_CONSIO_H
 #include <sys/consio.h>
-#elif HAVE_VT_H
+#else
 #include <sys/vt.h>
-#elif HAVE_WSDISPLAY_USL_IO_H
-#include <dev/wscons/wsdisplay_usl_io.h>
 #endif
 
 #include "drm_atomic.h"
@@ -42,12 +40,10 @@
 
 #include "common/common.h"
 #include "common/msg.h"
-#include "misc/ctype.h"
 #include "options/m_config.h"
 #include "osdep/io.h"
-#include "osdep/poll_wrapper.h"
 #include "osdep/timer.h"
-#include "present_sync.h"
+#include "misc/ctype.h"
 #include "video/out/vo.h"
 
 #define EVT_RELEASE 1
@@ -67,7 +63,8 @@ static int drm_connector_opt_help(struct mp_log *log, const struct m_option *opt
 static int drm_mode_opt_help(struct mp_log *log, const struct m_option *opt,
                              struct bstr name);
 
-static OPT_STRING_VALIDATE_FUNC(drm_validate_mode_opt);
+static int drm_validate_mode_opt(struct mp_log *log, const struct m_option *opt,
+                                 struct bstr name, const char **value);
 
 static void drm_show_available_modes(struct mp_log *log, const drmModeConnector *connector);
 
@@ -83,6 +80,8 @@ const struct m_sub_options drm_conf = {
             .help = drm_connector_opt_help},
         {"drm-mode", OPT_STRING_VALIDATE(mode_spec, drm_validate_mode_opt),
             .help = drm_mode_opt_help},
+        {"drm-atomic", OPT_CHOICE(drm_atomic, {"no", 0}, {"auto", 1}),
+            .deprecation_message = "this option is deprecated: DRM Atomic is required"},
         {"drm-draw-plane", OPT_CHOICE(draw_plane,
             {"primary", DRM_OPTS_PRIMARY_PLANE},
             {"overlay", DRM_OPTS_OVERLAY_PLANE}),
@@ -95,18 +94,21 @@ const struct m_sub_options drm_conf = {
             {"xrgb8888",    DRM_OPTS_FORMAT_XRGB8888},
             {"xrgb2101010", DRM_OPTS_FORMAT_XRGB2101010},
             {"xbgr8888",    DRM_OPTS_FORMAT_XBGR8888},
-            {"xbgr2101010", DRM_OPTS_FORMAT_XBGR2101010},
-            {"yuyv",        DRM_OPTS_FORMAT_YUYV})},
+            {"xbgr2101010", DRM_OPTS_FORMAT_XBGR2101010})},
         {"drm-draw-surface-size", OPT_SIZE_BOX(draw_surface_size)},
         {"drm-vrr-enabled", OPT_CHOICE(vrr_enabled,
             {"no", 0}, {"yes", 1}, {"auto", -1})},
+
+        {"drm-osd-plane-id", OPT_REPLACED("drm-draw-plane")},
+        {"drm-video-plane-id", OPT_REPLACED("drm-drmprime-video-plane")},
+        {"drm-osd-size", OPT_REPLACED("drm-draw-surface-size")},
         {0},
     },
     .defaults = &(const struct drm_opts) {
         .mode_spec = "preferred",
+        .drm_atomic = 1,
         .draw_plane = DRM_OPTS_PRIMARY_PLANE,
         .drmprime_video_plane = DRM_OPTS_OVERLAY_PLANE,
-        .drm_format = DRM_OPTS_FORMAT_XRGB8888,
     },
     .size = sizeof(struct drm_opts),
 };
@@ -151,10 +153,8 @@ struct drm_mode_spec {
 /* VT Switcher */
 static void vt_switcher_sighandler(int sig)
 {
-    int saved_errno = errno;
     unsigned char event = sig == RELEASE_SIGNAL ? EVT_RELEASE : EVT_ACQUIRE;
     (void)write(vt_switcher_pipe[1], &event, sizeof(event));
-    errno = saved_errno;
 }
 
 static bool has_signal_installed(int signo)
@@ -287,12 +287,12 @@ static void vt_switcher_destroy(struct vt_switcher *s)
     close(vt_switcher_pipe[1]);
 }
 
-static void vt_switcher_poll(struct vt_switcher *s, int timeout_ns)
+static void vt_switcher_poll(struct vt_switcher *s, int timeout_ms)
 {
     struct pollfd fds[1] = {
         { .events = POLLIN, .fd = vt_switcher_pipe[0] },
     };
-    mp_poll(fds, 1, timeout_ns);
+    poll(fds, 1, timeout_ms);
     if (!fds[0].revents)
         return;
 
@@ -387,7 +387,7 @@ bool vo_drm_acquire_crtc(struct vo_drm_state *drm)
     drm_object_set_property(request, atomic_ctx->draw_plane, "CRTC_H",  drm->mode.mode.vdisplay);
 
     if (drmModeAtomicCommit(drm->fd, request, DRM_MODE_ATOMIC_ALLOW_MODESET, NULL)) {
-        MP_ERR(drm, "Failed to commit ModeSetting atomic request: %s\n", mp_strerror(errno));
+        MP_ERR(drm, "Failed to commit ModeSetting atomic request: %s\n", strerror(errno));
         goto err;
     }
 
@@ -432,7 +432,7 @@ void vo_drm_release_crtc(struct vo_drm_state *drm)
 
     if (request)
         drmModeAtomicFree(request);
-
+    
     if (!success)
         MP_ERR(drm, "Failed to restore previous mode\n");
 
@@ -582,7 +582,7 @@ static bool setup_crtc(struct vo_drm_state *drm, const drmModeRes *res)
            drm->connector->connector_id);
     return false;
 
-success:
+  success:
     MP_VERBOSE(drm, "Selected Encoder %u with CRTC %u\n",
                drm->encoder->encoder_id, drm->crtc_id);
     return true;
@@ -809,29 +809,15 @@ static int open_card_path(const char *path)
 
 static bool card_supports_kms(const char *path)
 {
+#if HAVE_DRM_IS_KMS
     int fd = open_card_path(path);
     bool ret = fd != -1 && drmIsKMS(fd);
     if (fd != -1)
         close(fd);
     return ret;
-}
-
-static bool card_has_connection(const char *path)
-{
-    int fd = open_card_path(path);
-    bool ret = false;
-    if (fd != -1) {
-        drmModeRes *res = drmModeGetResources(fd);
-        if (res) {
-            drmModeConnector *connector = get_first_connected_connector(res, fd);
-            if (connector)
-                ret = true;
-            drmModeFreeConnector(connector);
-            drmModeFreeResources(res);
-        }
-        close(fd);
-    }
-    return ret;
+#else
+    return true;
+#endif
 }
 
 static void get_primary_device_path(struct vo_drm_state *drm)
@@ -883,17 +869,6 @@ static void get_primary_device_path(struct vo_drm_state *drm)
             continue;
         }
 
-        if (!card_has_connection(card_path)) {
-            if (card_no_given) {
-                MP_ERR(drm,
-                        "DRM card number %d given, but it does not have any "
-                        "connected outputs.\n", i);
-                break;
-            }
-
-            continue;
-        }
-
         MP_VERBOSE(drm, "Picked DRM card %d, primary node %s%s.\n",
                    i, card_path,
                    card_no_given ? "" : " as the default");
@@ -910,15 +885,74 @@ err:
     drmFreeDevices(devices, card_count);
 }
 
+
+static char *parse_connector_spec(struct vo_drm_state *drm)
+{
+    if (!drm->opts->connector_spec)
+        return NULL;
+    char *dot_ptr = strchr(drm->opts->connector_spec, '.');
+    if (dot_ptr) {
+        MP_WARN(drm, "Warning: Selecting a connector by index with drm-connector "
+                     "is deprecated. Use the drm-device option instead.\n");
+        drm->card_no = strtoul(drm->opts->connector_spec, NULL, 10);
+        return talloc_strdup(drm, dot_ptr + 1);
+    } else {
+        return talloc_strdup(drm, drm->opts->connector_spec);
+    }
+}
+
 static void drm_pflip_cb(int fd, unsigned int msc, unsigned int sec,
                          unsigned int usec, void *data)
 {
-    struct vo_drm_state *drm = data;
+    struct drm_pflip_cb_closure *closure = data;
 
-    int64_t ust = MP_TIME_S_TO_NS(sec) + MP_TIME_US_TO_NS(usec);
-    present_sync_update_values(drm->present, ust, msc);
-    present_sync_swap(drm->present);
-    drm->waiting_for_flip = false;
+    struct drm_vsync_tuple *vsync = closure->vsync;
+    // frame_vsync->ust is the timestamp of the pageflip that happened just before this flip was queued
+    // frame_vsync->msc is the sequence number of the pageflip that happened just before this flip was queued
+    // frame_vsync->sbc is the sequence number for the frame that was just flipped to screen
+    struct drm_vsync_tuple *frame_vsync = closure->frame_vsync;
+    struct vo_vsync_info *vsync_info = closure->vsync_info;
+
+    const bool ready =
+        (vsync->msc != 0) &&
+        (frame_vsync->ust != 0) && (frame_vsync->msc != 0);
+
+    const uint64_t ust = (sec * 1000000LL) + usec;
+
+    const unsigned int msc_since_last_flip = msc - vsync->msc;
+    if (ready && msc == vsync->msc) {
+        // Seems like some drivers only increment msc every other page flip when
+        // running in interlaced mode (I'm looking at you nouveau). Obviously we
+        // can't work with this, so shame the driver and bail.
+        mp_err(closure->log,
+               "Got the same msc value twice: (msc: %u, vsync->msc: %u). This shouldn't happen. Possibly broken driver/interlaced mode?\n",
+               msc, vsync->msc);
+        goto fail;
+    }
+
+    vsync->ust = ust;
+    vsync->msc = msc;
+
+    if (ready) {
+        // Convert to mp_time
+        struct timespec ts;
+        if (clock_gettime(CLOCK_MONOTONIC, &ts))
+            goto fail;
+        const uint64_t now_monotonic = ts.tv_sec * 1000000LL + ts.tv_nsec / 1000;
+        const uint64_t ust_mp_time = mp_time_us() - (now_monotonic - vsync->ust);
+
+        const uint64_t     ust_since_enqueue = vsync->ust - frame_vsync->ust;
+        const unsigned int msc_since_enqueue = vsync->msc - frame_vsync->msc;
+        const unsigned int sbc_since_enqueue = vsync->sbc - frame_vsync->sbc;
+
+        vsync_info->vsync_duration = ust_since_enqueue / msc_since_enqueue;
+        vsync_info->skipped_vsyncs = msc_since_last_flip - 1; // Valid iff swap_buffers is called every vsync
+        vsync_info->last_queue_display_time = ust_mp_time + (sbc_since_enqueue * vsync_info->vsync_duration);
+    }
+
+fail:
+    *closure->waiting_for_flip = false;
+    talloc_free(closure);
 }
 
 int vo_drm_control(struct vo *vo, int *events, int request, void *arg)
@@ -943,6 +977,10 @@ int vo_drm_control(struct vo *vo, int *events, int request, void *arg)
         return VO_TRUE;
     case VOCTRL_RESUME:
         drm->paused = false;
+        drm->vsync_info.last_queue_display_time = -1;
+        drm->vsync_info.skipped_vsyncs = 0;
+        drm->vsync.ust = 0;
+        drm->vsync.msc = 0;
         return VO_TRUE;
     }
     return VO_NOTIMPL;
@@ -972,6 +1010,7 @@ bool vo_drm_init(struct vo *vo)
     drm->opts = mp_get_config_group(drm, drm->vo->global, &drm_conf);
 
     drmModeRes *res = NULL;
+    char *connector_name = parse_connector_spec(drm);
     get_primary_device_path(drm);
 
     if (!drm->card_path) {
@@ -998,7 +1037,7 @@ bool vo_drm_init(struct vo *vo)
         goto err;
     }
 
-    if (!setup_connector(drm, res, drm->opts->connector_spec))
+    if (!setup_connector(drm, res, connector_name))
         goto err;
     if (!setup_crtc(drm, res))
         goto err;
@@ -1029,7 +1068,10 @@ bool vo_drm_init(struct vo *vo)
 
     drm->ev.version = DRM_EVENT_CONTEXT_VERSION;
     drm->ev.page_flip_handler = &drm_pflip_cb;
-    drm->present = mp_present_initialize(drm, drm->vo->opts, VO_MAX_SWAPCHAIN_DEPTH);
+
+    drm->vsync_info.vsync_duration = 0;
+    drm->vsync_info.skipped_vsyncs = -1;
+    drm->vsync_info.last_queue_display_time = -1;
 
     return true;
 
@@ -1240,6 +1282,12 @@ double vo_drm_get_display_fps(struct vo_drm_state *drm)
     return mode_get_Hz(&drm->mode.mode);
 }
 
+void vo_drm_get_vsync(struct vo *vo, struct vo_vsync_info *info)
+{
+    struct vo_drm_state *drm = vo->drm;
+    *info = drm->vsync_info;
+}
+
 void vo_drm_set_monitor_par(struct vo *vo)
 {
     struct vo_drm_state *drm = vo->drm;
@@ -1252,15 +1300,15 @@ void vo_drm_set_monitor_par(struct vo *vo)
     MP_VERBOSE(drm, "Monitor pixel aspect: %g\n", vo->monitor_par);
 }
 
-void vo_drm_wait_events(struct vo *vo, int64_t until_time_ns)
+void vo_drm_wait_events(struct vo *vo, int64_t until_time_us)
 {
     struct vo_drm_state *drm = vo->drm;
     if (drm->vt_switcher_active) {
-        int64_t wait_ns = until_time_ns - mp_time_ns();
-        int64_t timeout_ns = MPCLAMP(wait_ns, 0, MP_TIME_S_TO_NS(10));
-        vt_switcher_poll(&drm->vt_switcher, timeout_ns);
+        int64_t wait_us = until_time_us - mp_time_us();
+        int timeout_ms = MPCLAMP((wait_us + 500) / 1000, 0, 10000);
+        vt_switcher_poll(&drm->vt_switcher, timeout_ms);
     } else {
-        vo_wait_default(vo, until_time_ns);
+        vo_wait_default(vo, until_time_us);
     }
 }
 

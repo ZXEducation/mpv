@@ -74,8 +74,6 @@ struct sub_bitmaps {
     int packed_w, packed_h;
 
     int change_id;  // Incremented on each change (0 is never used)
-
-    bool video_color_space; // True if the bitmap is in video color space
 };
 
 struct sub_bitmap_list {
@@ -126,7 +124,6 @@ enum mp_osd_font_codepoints {
     OSD_BRIGHTNESS = 0x0A,
     OSD_HUE = 0x0B,
     OSD_BALANCE = 0x0C,
-    OSD_REV = 0x0D,
     OSD_PANSCAN = 0x50,
 
     OSD_PB_START = 0x10,
@@ -145,10 +142,10 @@ struct osd_style_opts {
     char *font;
     float font_size;
     struct m_color color;
-    struct m_color outline_color;
+    struct m_color border_color;
+    struct m_color shadow_color;
     struct m_color back_color;
-    int border_style;
-    float outline_size;
+    float border_size;
     float shadow_offset;
     float spacing;
     int margin_x;
@@ -246,6 +243,5 @@ void osd_set_external(struct osd_state *osd, struct osd_external_ass *ov);
 void osd_set_external_remove_owner(struct osd_state *osd, void *owner);
 void osd_get_text_size(struct osd_state *osd, int *out_screen_h, int *out_font_h);
 void osd_get_function_sym(char *buffer, size_t buffer_size, int osd_function);
-void osd_mangle_ass(bstr *dst, const char *in, bool replace_newlines);
 
 #endif /* MPLAYER_SUB_H */

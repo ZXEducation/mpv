@@ -17,6 +17,7 @@
 
 #include <stdio.h>
 #include <stdlib.h>
+#include <unistd.h>
 #include <stdbool.h>
 #include <assert.h>
 
@@ -43,7 +44,6 @@
 #include "options/options.h"
 
 struct priv {
-    struct mp_codec_params *codec;
     AVCodecContext *avctx;
     AVFrame *avframe;
     AVPacket *avpkt;
@@ -113,6 +113,10 @@ static bool init(struct mp_filter *da, struct mp_codec_params *codec,
     if (opts->downmix && mpopts->audio_output_channels.num_chmaps == 1) {
         const struct mp_chmap *requested_layout =
             &mpopts->audio_output_channels.chmaps[0];
+#if !HAVE_AV_CHANNEL_LAYOUT
+        lavc_context->request_channel_layout =
+            mp_chmap_to_lavc(requested_layout);
+#else
         AVChannelLayout av_layout = { 0 };
         mp_chmap_to_av_layout(&av_layout, requested_layout);
 
@@ -122,6 +126,7 @@ static bool init(struct mp_filter *da, struct mp_codec_params *codec,
                             AV_OPT_SEARCH_CHILDREN);
 
         av_channel_layout_uninit(&av_layout);
+#endif
     }
 
     // Always try to set - option only exists for AC3 at the moment
@@ -151,7 +156,7 @@ static bool init(struct mp_filter *da, struct mp_codec_params *codec,
     return true;
 }
 
-static void ad_lavc_destroy(struct mp_filter *da)
+static void destroy(struct mp_filter *da)
 {
     struct priv *ctx = da->priv;
 
@@ -160,7 +165,7 @@ static void ad_lavc_destroy(struct mp_filter *da)
     mp_free_av_packet(&ctx->avpkt);
 }
 
-static void ad_lavc_reset(struct mp_filter *da)
+static void reset(struct mp_filter *da)
 {
     struct priv *ctx = da->priv;
 
@@ -213,9 +218,6 @@ static int receive_frame(struct mp_filter *da, struct mp_frame *out)
 
     if (!priv->avframe->buf[0])
         return ret;
-
-    mp_codec_info_from_av(avctx, priv->codec);
-    mp_chmap_from_av_layout(&priv->codec->channels, &avctx->ch_layout);
 
     double out_pts = mp_pts_from_av(priv->avframe->pts, &priv->codec_timebase);
 
@@ -274,7 +276,7 @@ static int receive_frame(struct mp_filter *da, struct mp_frame *out)
     return ret;
 }
 
-static void ad_lavc_process(struct mp_filter *ad)
+static void process(struct mp_filter *ad)
 {
     struct priv *priv = ad->priv;
 
@@ -284,9 +286,9 @@ static void ad_lavc_process(struct mp_filter *ad)
 static const struct mp_filter_info ad_lavc_filter = {
     .name = "ad_lavc",
     .priv_size = sizeof(struct priv),
-    .process = ad_lavc_process,
-    .reset = ad_lavc_reset,
-    .destroy = ad_lavc_destroy,
+    .process = process,
+    .reset = reset,
+    .destroy = destroy,
 };
 
 static struct mp_decoder *create(struct mp_filter *parent,
@@ -303,17 +305,12 @@ static struct mp_decoder *create(struct mp_filter *parent,
     da->log = mp_log_new(da, parent->log, NULL);
 
     struct priv *priv = da->priv;
-    priv->codec = codec;
     priv->public.f = da;
 
     if (!init(da, codec, decoder)) {
         talloc_free(da);
         return NULL;
     }
-
-    codec->codec_desc = priv->avctx->codec_descriptor->long_name;
-    mp_chmap_from_av_layout(&priv->codec->channels, &priv->avctx->ch_layout);
-
     return &priv->public;
 }
 

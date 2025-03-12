@@ -1,7 +1,6 @@
 #ifndef MPV_MP_THREAD_POOL_H
 #define MPV_MP_THREAD_POOL_H
 
-#include <stdbool.h>
 struct mp_thread_pool;
 
 // Create a thread pool with the given number of worker threads. This can return

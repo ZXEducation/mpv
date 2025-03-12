@@ -32,9 +32,6 @@
 // it's guaranteed that you can seek back by <= of this size again.
 #define STREAM_BUFFER_SIZE 2048
 
-// Maximum size of a complete read.
-#define STREAM_MAX_READ_SIZE (INT_MAX - 1)
-
 // flags for stream_open_ext (this includes STREAM_READ and STREAM_WRITE)
 
 // stream->mode
@@ -114,8 +111,6 @@ typedef struct stream_info_st {
     // Alternative to open(). Only either open() or open2() can be set.
     int (*open2)(struct stream *st, const struct stream_open_args *args);
     const char *const *protocols;
-    // Alternative to protocols. For stream_lavf.
-    char **(*get_protocols)(void);
     bool can_write;     // correctly checks for READ/WRITE modes
     bool local_fs;      // supports STREAM_LOCAL_FS_ONLY
     int stream_origin;  // 0 or set of STREAM_ORIGIN_*; if 0, the same origin
@@ -152,7 +147,7 @@ typedef struct stream {
     bool seekable : 1; // presence of general byte seeking support
     bool fast_skip : 1; // consider stream fast enough to fw-seek by skipping
     bool is_network : 1; // I really don't know what this is for
-    bool is_local_fs : 1; // from the filesystem
+    bool is_local_file : 1; // from the filesystem
     bool is_directory : 1; // directory on the filesystem
     bool access_references : 1; // open other streams
     struct mp_log *log;

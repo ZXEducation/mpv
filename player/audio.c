@@ -54,7 +54,6 @@ static void update_speed_filters(struct MPContext *mpctx)
     if (!ao_c)
         return;
 
-    double pitch = mpctx->opts->playback_pitch;
     double speed = mpctx->opts->playback_speed;
     double resample = mpctx->speed_factor_a;
     double drop = 1.0;
@@ -64,22 +63,17 @@ static void update_speed_filters(struct MPContext *mpctx)
         speed = 1.0;
     }
 
-    int video_sync = mpctx->display_sync_active ?
-        mpctx->video_out->opts->video_sync : VS_NONE;
-    switch (video_sync) {
-        case VS_DISP_ADROP:
-            drop *= speed * resample / pitch;
-            resample = pitch;
-            speed = 1.0;
-            break;
-        case VS_DISP_TEMPO:
-            speed = mpctx->audio_speed / pitch;
-            resample = pitch;
-            break;
-        default:
-            resample *= pitch;
-            speed /= pitch;
-            break;
+    if (mpctx->display_sync_active) {
+        switch (mpctx->video_out->opts->video_sync) {
+            case VS_DISP_ADROP:
+                drop *= speed * resample;
+                resample = speed = 1.0;
+                break;
+            case VS_DISP_TEMPO:
+                speed = mpctx->audio_speed;
+                resample = 1.0;
+                break;
+        }
     }
 
     mp_output_chain_set_audio_speed(ao_c->filter, speed, resample, drop);
@@ -181,8 +175,7 @@ void audio_update_volume(struct MPContext *mpctx)
     float gain = MPMAX(opts->softvol_volume / 100.0, 0);
     gain = pow(gain, 3);
     gain *= compute_replaygain(mpctx);
-    gain *= db_gain(opts->softvol_gain);
-    if (opts->softvol_mute)
+    if (opts->softvol_mute == 1)
         gain = 0.0;
 
     ao_set_gain(ao_c->ao, gain);
@@ -211,6 +204,16 @@ static bool has_video_track(struct MPContext *mpctx)
     return false;
 }
 
+void audio_update_media_role(struct MPContext *mpctx)
+{
+    if (!mpctx->ao)
+        return;
+
+    enum aocontrol_media_role role = has_video_track(mpctx) ?
+        AOCONTROL_MEDIA_ROLE_MOVIE : AOCONTROL_MEDIA_ROLE_MUSIC;
+    ao_control(mpctx->ao, AOCONTROL_UPDATE_MEDIA_ROLE, &role);
+}
+
 static void ao_chain_reset_state(struct ao_chain *ao_c)
 {
     ao_c->last_out_pts = MP_NOPTS_VALUE;
@@ -219,7 +222,6 @@ static void ao_chain_reset_state(struct ao_chain *ao_c)
     ao_c->start_pts = MP_NOPTS_VALUE;
     ao_c->untimed_throttle = false;
     ao_c->underrun = false;
-    ao_c->delaying_audio_start = false;
 }
 
 void reset_audio_state(struct MPContext *mpctx)
@@ -438,9 +440,6 @@ static int reinit_audio_filters_and_output(struct MPContext *mpctx)
                           opts->audio_output_channels.num_chmaps);
     }
 
-    if (!has_video_track(mpctx))
-        ao_flags |= AO_INIT_MEDIA_ROLE_MUSIC;
-
     mpctx->ao_filter_fmt = out_fmt;
 
     mpctx->ao = ao_init_best(mpctx->global, ao_flags, mp_wakeup_core_cb,
@@ -494,12 +493,13 @@ static int reinit_audio_filters_and_output(struct MPContext *mpctx)
     ao_c->ao_resume_time =
         opts->audio_wait_open > 0 ? mp_time_sec() + opts->audio_wait_open : 0;
 
-    bool eof = mpctx->audio_status == STATUS_EOF;
-    ao_set_paused(mpctx->ao, get_internal_paused(mpctx), eof);
+    ao_set_paused(mpctx->ao, get_internal_paused(mpctx));
 
     ao_chain_set_ao(ao_c, mpctx->ao);
 
     audio_update_volume(mpctx);
+
+    audio_update_media_role(mpctx);
 
     // Almost nonsensical hack to deal with certain format change scenarios.
     if (mpctx->audio_status == STATUS_PLAYING)
@@ -619,8 +619,7 @@ double written_audio_pts(struct MPContext *mpctx)
     return mpctx->ao_chain ? mpctx->ao_chain->last_out_pts : MP_NOPTS_VALUE;
 }
 
-// Return pts value corresponding to currently playing audio adjusted for AO delay
-// and playback speed.
+// Return pts value corresponding to currently playing audio.
 double playing_audio_pts(struct MPContext *mpctx)
 {
     double pts = written_audio_pts(mpctx);
@@ -732,8 +731,7 @@ static void ao_process(struct mp_filter *f)
 
         mpctx->shown_aframes += samples;
         double real_samplerate = mp_aframe_get_rate(af) / mpctx->audio_speed;
-        if (mpctx->video_status != STATUS_EOF)
-            mpctx->delay += samples / real_samplerate;
+        mpctx->delay += samples / real_samplerate;
         ao_c->last_out_pts = mp_aframe_end_pts(af);
         update_throttle(mpctx);
 
@@ -837,7 +835,7 @@ void audio_start_ao(struct MPContext *mpctx)
     double pts = MP_NOPTS_VALUE;
     if (!get_sync_pts(mpctx, &pts))
         return;
-    double apts = playing_audio_pts(mpctx);
+    double apts = playing_audio_pts(mpctx); // (basically including mpctx->delay)
     if (pts != MP_NOPTS_VALUE && apts != MP_NOPTS_VALUE && pts < apts &&
         mpctx->video_status != STATUS_EOF)
     {
@@ -848,13 +846,11 @@ void audio_start_ao(struct MPContext *mpctx)
             MP_VERBOSE(mpctx, "delaying audio start %f vs. %f, diff=%f\n",
                        apts, pts, diff);
             mpctx->logged_async_diff = diff;
-            ao_c->delaying_audio_start = true;
         }
         return;
     }
 
     MP_VERBOSE(mpctx, "starting audio playback\n");
-    ao_c->delaying_audio_start = false;
     ao_start(ao_c->ao);
     mpctx->audio_status = STATUS_PLAYING;
     if (ao_c->out_eof) {
@@ -975,7 +971,8 @@ void fill_audio_out_buffers(struct MPContext *mpctx)
     if (mpctx->audio_status == STATUS_DRAINING) {
         // Wait until the AO has played all queued data. In the gapless case,
         // we trigger EOF immediately, and let it play asynchronously.
-        if (!ao_c->ao || (!ao_is_playing(ao_c->ao) || opts->gapless_audio))
+        if (!ao_c->ao || (!ao_is_playing(ao_c->ao) ||
+                          (opts->gapless_audio && !ao_untimed(ao_c->ao))))
         {
             MP_VERBOSE(mpctx, "audio EOF reached\n");
             mpctx->audio_status = STATUS_EOF;

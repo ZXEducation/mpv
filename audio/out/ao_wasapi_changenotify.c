@@ -155,11 +155,6 @@ static HRESULT STDMETHODCALLTYPE sIMMNotificationClient_OnDefaultDeviceChanged(
     return S_OK;
 }
 
-// IsEqualIID in Windows SDK passes GUID as REFGUID (reference) in C++, but in
-// C is has to get pointers...
-#undef IsEqualPropertyKey
-#define IsEqualPropertyKey(a, b) (((a).pid == (b).pid) && IsEqualIID(&(a).fmtid, &(b).fmtid))
-
 static HRESULT STDMETHODCALLTYPE sIMMNotificationClient_OnPropertyValueChanged(
     IMMNotificationClient *This,
     LPCWSTR pwstrDeviceId,
@@ -202,7 +197,7 @@ HRESULT wasapi_change_init(struct ao *ao, bool is_hotplug)
 {
     struct wasapi_state *state = ao->priv;
     struct change_notify *change = &state->change;
-    HRESULT hr = CoCreateInstance(&CLSID_MMDeviceEnumerator, NULL, CLSCTX_INPROC_SERVER,
+    HRESULT hr = CoCreateInstance(&CLSID_MMDeviceEnumerator, NULL, CLSCTX_ALL,
                                   &IID_IMMDeviceEnumerator,
                                   (void **)&change->pEnumerator);
     EXIT_ON_ERROR(hr);

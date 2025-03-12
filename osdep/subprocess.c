@@ -15,11 +15,17 @@
  * License along with mpv.  If not, see <http://www.gnu.org/licenses/>.
  */
 
+#include <pthread.h>
+
 #include "common/common.h"
 #include "common/msg.h"
 #include "common/msg_control.h"
 
 #include "subprocess.h"
+
+void mp_devnull(void *ctx, char *data, size_t size)
+{
+}
 
 const char *mp_subprocess_err_str(int num)
 {
@@ -32,18 +38,4 @@ const char *mp_subprocess_err_str(int num)
     case MP_SUBPROCESS_EGENERIC:        // fall through
     default:                            return "unknown";
     }
-}
-
-void mp_subprocess(struct mp_log *log,
-                   struct mp_subprocess_opts *opts,
-                   struct mp_subprocess_result *res)
-{
-    mp_verbose(log, "Starting subprocess: [%s", opts->args[0]);
-    char **arg = &opts->args[1];
-    while (*arg)
-        mp_verbose(log, ", %s", *arg++);
-    mp_verbose(log, "]\n");
-    mp_subprocess2(opts, res);
-    if (res->error < 0)
-        mp_err(log, "Subprocess failed: %s\n", mp_subprocess_err_str(res->error));
 }

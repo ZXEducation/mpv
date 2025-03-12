@@ -1,10 +1,9 @@
+#include <pthread.h>
 
 #include "rendezvous.h"
 
-#include "osdep/threads.h"
-
-static mp_static_mutex lock = MP_STATIC_MUTEX_INITIALIZER;
-static mp_cond wakeup = MP_STATIC_COND_INITIALIZER;
+static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t wakeup = PTHREAD_COND_INITIALIZER;
 
 static struct waiter *waiters;
 
@@ -28,11 +27,11 @@ struct waiter {
  * of _all_ waiters in the process, and temporarily wakes up _all_ waiters on
  * each second call).
  *
- * This is inspired by: https://man.cat-v.org/plan_9/2/rendezvous */
+ * This is inspired by: http://9atom.org/magic/man2html/2/rendezvous */
 intptr_t mp_rendezvous(void *tag, intptr_t value)
 {
     struct waiter wait = { .tag = tag, .value = &value };
-    mp_mutex_lock(&lock);
+    pthread_mutex_lock(&lock);
     struct waiter **prev = &waiters;
     while (*prev) {
         if ((*prev)->tag == tag) {
@@ -41,15 +40,15 @@ intptr_t mp_rendezvous(void *tag, intptr_t value)
             value = tmp;
             (*prev)->value = NULL; // signals completion
             *prev = (*prev)->next; // unlink
-            mp_cond_broadcast(&wakeup);
+            pthread_cond_broadcast(&wakeup);
             goto done;
         }
         prev = &(*prev)->next;
     }
     *prev = &wait;
     while (wait.value)
-        mp_cond_wait(&wakeup, &lock);
+        pthread_cond_wait(&wakeup, &lock);
 done:
-    mp_mutex_unlock(&lock);
+    pthread_mutex_unlock(&lock);
     return value;
 }

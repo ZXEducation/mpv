@@ -19,10 +19,6 @@ in the list.
     does not work, it will fallback to other drivers (in the same order as
     listed by ``--vo=help``).
 
-    Note that the default video output driver is subject to change, and must
-    not be relied upon. If a certain VO needs to be used (e.g. for ``libmpv``
-    rendering API), it must be explicitly specified.
-
 Available video output drivers are:
 
 ``gpu``
@@ -32,11 +28,10 @@ Available video output drivers are:
 
     See `GPU renderer options`_ for options specific to this VO.
 
-    By default, mpv utilizes settings that balance quality and performance.
-    Additionally, two predefined profiles are available: ``fast`` for maximum
-    performance and ``high-quality`` for superior rendering quality. You can
-    apply a specific profile using the ``--profile=<name>`` option and inspect
-    its contents using ``--show-profile=<name>``.
+    By default, it tries to use fast and fail-safe settings. Use the
+    ``gpu-hq`` profile to use this driver with defaults set to high quality
+    rendering. The profile can be applied with ``--profile=gpu-hq`` and its
+    contents can be viewed with ``--show-profile=gpu-hq``.
 
     This VO abstracts over several possible graphics APIs and windowing
     contexts, which can be influenced using the ``--gpu-api`` and
@@ -321,6 +316,25 @@ Available video output drivers are:
         nla
             ``non-linear anamorphic scaling``
 
+    ``--vo-vaapi-deint-mode=<mode>``
+        Select deinterlacing algorithm. Note that by default deinterlacing is
+        initially always off, and needs to be enabled with the ``d`` key
+        (default key binding for ``cycle deinterlace``).
+
+        This option doesn't apply if libva supports video post processing (vpp).
+        In this case, the default for ``deint-mode`` is ``no``, and enabling
+        deinterlacing via user interaction using the methods mentioned above
+        actually inserts the ``vavpp`` video filter. If vpp is not actually
+        supported with the libva backend in use, you can use this option to
+        forcibly enable VO based deinterlacing.
+
+        no
+            Don't allow deinterlacing (default for newer libva).
+        first-field
+            Show only first field.
+        bob
+            bob deinterlacing (default for older libva).
+
     ``--vo-vaapi-scaled-osd=<yes|no>``
         If enabled, then the OSD is rendered at video resolution and scaled to
         display resolution. By default, this is disabled, and the OSD is
@@ -329,7 +343,7 @@ Available video output drivers are:
 ``null``
     Produces no video output. Useful for benchmarking.
 
-    Usually, it's better to disable video with ``--video=no`` instead.
+    Usually, it's better to disable video with ``--no-video`` instead.
 
     The following global options are supported by this video output:
 
@@ -339,21 +353,6 @@ Available video output drivers are:
 
 ``caca``
     Color ASCII art video output driver that works on a text console.
-
-    This driver reserves some keys for runtime configuration. These keys are
-    hardcoded and cannot be bound:
-
-    d and D
-        Toggle dithering algorithm.
-
-    a and A
-        Toggle antialiasing method.
-
-    h and H
-        Toggle charset method.
-
-    c and C
-        Toggle color method.
 
     .. note:: This driver is a joke.
 
@@ -367,7 +366,7 @@ Available video output drivers are:
     performance.
 
     Note: the TCT image output is not synchronized with other terminal output
-    from mpv, which can lead to broken images. The options ``--terminal=no`` or
+    from mpv, which can lead to broken images. The options ``--no-terminal`` or
     ``--really-quiet`` can help with that.
 
     ``--vo-tct-algo=<algo>``
@@ -379,25 +378,6 @@ Available video output drivers are:
         plain
             Uses spaces. Causes vertical resolution to drop twofolds, but in
             theory works in more places.
-
-    ``--vo-tct-buffering=<pixel|line|frame>``
-        Specifies the size of data batches buffered before being sent to the
-        terminal.
-
-        TCT image output is not synchronized with other terminal output from mpv,
-        which can lead to broken images. Sending data to the terminal in small
-        batches may improve parallelism between terminal processing and mpv
-        processing but incurs a static overhead of generating tens of thousands
-        of small writes. Also, depending on the terminal used, sending frames in
-        one chunk might help with tearing of the output, especially if not used
-        with ``--really-quiet`` and other logs interrupt the data stream.
-
-        pixel
-            Send data to terminal for each pixel.
-        line
-            Send data to terminal for each line. (Default)
-        frame
-            Send data to terminal for each frame.
 
     ``--vo-tct-width=<width>``  ``--vo-tct-height=<height>``
         Assume the terminal has the specified character width and/or height.
@@ -605,6 +585,37 @@ Available video output drivers are:
     This also supports many of the options the ``gpu`` VO has, depending on the
     backend.
 
+``rpi`` (Raspberry Pi)
+    Native video output on the Raspberry Pi using the MMAL API.
+
+    This is deprecated. Use ``--vo=gpu`` instead, which is the default and
+    provides the same functionality. The ``rpi`` VO will be removed in
+    mpv 0.23.0. Its functionality was folded into --vo=gpu, which now uses
+    RPI hardware decoding by treating it as a hardware overlay (without applying
+    GL filtering). Also to be changed in 0.23.0: the --fs flag will be reset to
+    "no" by default (like on the other platforms).
+
+    The following deprecated global options are supported by this video output:
+
+    ``--rpi-display=<number>``
+        Select the display number on which the video overlay should be shown
+        (default: 0).
+
+    ``--rpi-layer=<number>``
+        Select the dispmanx layer on which the video overlay should be shown
+        (default: -10). Note that mpv will also use the 2 layers above the
+        selected layer, to handle the window background and OSD. Actual video
+        rendering will happen on the layer above the selected layer.
+
+    ``--rpi-background=<yes|no>``
+        Whether to render a black background behind the video (default: no).
+        Normally it's better to kill the console framebuffer instead, which
+        gives better performance.
+
+    ``--rpi-osd=<yes|no>``
+        Enabled by default. If disabled with ``no``, no OSD layer is created.
+        This also means there will be no subtitles rendered.
+
 ``drm`` (Direct Rendering Manager)
     Video output driver using Kernel Mode Setting / Direct Rendering Manager.
     Should be used when one doesn't want to install full-blown graphical
@@ -616,15 +627,18 @@ Available video output drivers are:
 
     The following global options are supported by this video output:
 
-    ``--drm-connector=<name>``
+    ``--drm-connector=[<gpu_number>.]<name>``
         Select the connector to use (usually this is a monitor.) If ``<name>``
         is empty or ``auto``, mpv renders the output on the first available
         connector. Use ``--drm-connector=help`` to get a list of available
-        connectors. (default: empty)
+        connectors. The ``<gpu_number>`` argument can be used to disambiguate
+        multiple graphic cards, but is deprecated in favor of ``--drm-device``.
+        (default: empty)
 
     ``--drm-device=<path>``
         Select the DRM device file to use. If specified this overrides automatic
-        card selection. (default: empty)
+        card selection and any card number specified ``--drm-connector``.
+        (default: empty)
 
     ``--drm-mode=<preferred|highest|N|WxH[@R]>``
         Mode to use (resolution and frame rate).
@@ -665,20 +679,17 @@ Available video output drivers are:
         lower resolution (the video when handled by the hwdec will be on the
         drmprime-video plane and at full 4K resolution)
 
-    ``--drm-format=<xrgb8888|xbgr8888|xrgb2101010|xbgr2101010|yuyv>``
+    ``--drm-format=<xrgb8888|xrgb2101010>``
         Select the DRM format to use (default: xrgb8888). This allows you to
-        choose the bit depth and color type of the DRM mode.
-
-        xrgb8888 is your usual 24bpp packed RGB format with 8 bits of padding.
-        xrgb2101010 is a 30bpp packed RGB format with 2 bits of padding.
-        yuyv is a 32bpp packed YUV 4:2:2 format. No planar formats are currently
-        supported.
+        choose the bit depth of the DRM mode. xrgb8888 is your usual 24 bit per
+        pixel/8 bits per channel packed RGB format with 8 bits of padding.
+        xrgb2101010 is a packed 30 bits per pixel/10 bits per channel packed RGB
+        format with 2 bits of padding.
 
         There are cases when xrgb2101010 will work with the ``drm`` VO, but not
         with the ``drm`` backend for the ``gpu`` VO. This is because with the
         ``gpu`` VO, in addition to requiring support in your DRM driver,
-        requires support for xrgb2101010 in your EGL driver.
-        yuyv only ever works with the ``drm`` VO.
+        requires support for xrgb2101010 in your EGL driver
 
     ``--drm-draw-surface-size=<[WxH]>``
         Sets the size of the surface used on the draw plane. The surface will

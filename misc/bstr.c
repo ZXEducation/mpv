@@ -16,6 +16,7 @@
  */
 
 #include <string.h>
+#include <strings.h>
 #include <assert.h>
 #include <stdarg.h>
 #include <stdint.h>
@@ -63,25 +64,18 @@ int bstrcasecmp(struct bstr str1, struct bstr str2)
 
 int bstrchr(struct bstr str, int c)
 {
-    if (!str.len)
-        return -1;
-    unsigned char *pos = memchr(str.start, c, str.len);
-    return pos ? pos - str.start : -1;
+    for (int i = 0; i < str.len; i++)
+        if (str.start[i] == c)
+            return i;
+    return -1;
 }
 
 int bstrrchr(struct bstr str, int c)
 {
-    if (!str.len)
-        return -1;
-#if HAVE_MEMRCHR
-    unsigned char *pos = memrchr(str.start, c, str.len);
-    return pos ? pos - str.start : -1;
-#else
     for (int i = str.len - 1; i >= 0; i--)
         if (str.start[i] == c)
             return i;
     return -1;
-#endif
 }
 
 int bstrcspn(struct bstr str, const char *reject)
@@ -371,7 +365,7 @@ void bstr_xappend(void *talloc_ctx, bstr *s, bstr append)
     if (!append.len)
         return;
     resize_append(talloc_ctx, s, append.len + 1);
-    memmove(s->start + s->len, append.start, append.len);
+    memcpy(s->start + s->len, append.start, append.len);
     s->len += append.len;
     s->start[s->len] = '\0';
 }
@@ -473,23 +467,3 @@ bool bstr_decode_hex(void *talloc_ctx, struct bstr hex, struct bstr *out)
     *out = (struct bstr){ .start = arr, .len = len };
     return true;
 }
-
-#ifdef _WIN32
-
-#include <windows.h>
-
-int bstr_to_wchar(void *talloc_ctx, struct bstr s, wchar_t **ret)
-{
-    int count = MultiByteToWideChar(CP_UTF8, 0, s.start, s.len, NULL, 0);
-    if (count <= 0)
-        abort();
-    wchar_t *wbuf = *ret;
-    if (!wbuf || ta_get_size(wbuf) < (count + 1) * sizeof(wchar_t))
-        wbuf = talloc_realloc(talloc_ctx, wbuf, wchar_t, count + 1);
-    MultiByteToWideChar(CP_UTF8, 0, s.start, s.len, wbuf, count);
-    wbuf[count] = L'\0';
-    *ret = wbuf;
-    return count;
-}
-
-#endif

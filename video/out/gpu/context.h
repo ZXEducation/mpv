@@ -10,8 +10,8 @@ struct ra_ctx_opts {
     bool want_alpha;      // create an alpha framebuffer if possible
     bool debug;           // enable debugging layers/callbacks etc.
     bool probing;        // the backend was auto-probed
-    struct m_obj_settings *context_list; // list of `ra_ctx_fns.name` to probe
-    struct m_obj_settings *context_type_list;  // list of `ra_ctx_fns.type` to probe
+    char *context_name;  // filter by `ra_ctx_fns.name`
+    char *context_type;  // filter by `ra_ctx_fns.type`
 };
 
 extern const struct m_sub_options ra_ctx_conf;
@@ -34,7 +34,8 @@ struct ra_ctx {
 struct ra_ctx_fns {
     const char *type; // API type (for --gpu-api)
     const char *name; // name (for --gpu-context)
-    const char *description; // description (for --gpu-context=help)
+
+    bool hidden; // hide the ra_ctx from users
 
     // Resize the window, or create a new window if there isn't one yet.
     // Currently, there is an unfortunate interaction with ctx->vo, and
@@ -47,7 +48,7 @@ struct ra_ctx_fns {
     // These behave exactly like vo_driver.wakeup/wait_events. They are
     // optional.
     void (*wakeup)(struct ra_ctx *ctx);
-    void (*wait_events)(struct ra_ctx *ctx, int64_t until_time_ns);
+    void (*wait_events)(struct ra_ctx *ctx, int64_t until_time_us);
     void (*update_render_opts)(struct ra_ctx *ctx);
 
     // Initialize/destroy the 'struct ra' and possibly the underlying VO backend.
@@ -71,7 +72,7 @@ struct ra_fbo {
 
     // Host system's colorspace that it will be interpreting
     // the frame buffer as.
-    struct pl_color_space color_space;
+    struct mp_colorspace color_space;
 };
 
 struct ra_swapchain_fns {

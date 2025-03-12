@@ -20,11 +20,12 @@
 #ifndef MP_LANGUAGE_H
 #define MP_LANGUAGE_H
 
-#include "misc/bstr.h"
+#define LANGUAGE_SCORE_BITS 16
+#define LANGUAGE_SCORE_MAX (1 << LANGUAGE_SCORE_BITS)
 
-// Result numerically higher => better match. 0 == no match.
-int mp_match_lang(char **langs, const char *lang);
+// Where applicable, l1 is the user-specified code and l2 is the code being checked against it
+int mp_match_lang_single(const char *l1, const char *l2);
+
 char **mp_get_user_langs(void);
-bstr mp_guess_lang_from_filename(bstr name, int *lang_start);
 
 #endif /* MP_LANGUAGE_H */

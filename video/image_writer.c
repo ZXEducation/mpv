@@ -25,7 +25,6 @@
 #include <libavutil/mem.h>
 #include <libavutil/opt.h>
 #include <libavutil/pixdesc.h>
-#include <libplacebo/utils/libav.h>
 
 #include "common/msg.h"
 #include "config.h"
@@ -36,7 +35,6 @@
 #endif
 
 #include "osdep/io.h"
-#include "misc/path_utils.h"
 
 #include "common/av_common.h"
 #include "common/msg.h"
@@ -61,10 +59,12 @@ const struct image_writer_opts image_writer_opts_defaults = {
     .jxl_distance = 1.0,
     .jxl_effort = 4,
     .avif_encoder = "libaom-av1",
+    .avif_pixfmt = "yuv420p",
     .avif_opts = (char*[]){
         "usage",    "allintra",
-        "crf",      "0",
+        "crf",      "32",
         "cpu-used", "8",
+        "tune",     "ssim",
         NULL
     },
     .tag_csp = true,
@@ -75,8 +75,12 @@ const struct m_opt_choice_alternatives mp_image_writer_formats[] = {
     {"jpeg", AV_CODEC_ID_MJPEG},
     {"png",  AV_CODEC_ID_PNG},
     {"webp", AV_CODEC_ID_WEBP},
+#if HAVE_JPEGXL
     {"jxl",  AV_CODEC_ID_JPEGXL},
+#endif
+#if HAVE_AVIF_MUXER
     {"avif",  AV_CODEC_ID_AV1},
+#endif
     {0}
 };
 
@@ -91,11 +95,15 @@ const struct m_option image_writer_opts[] = {
     {"webp-lossless", OPT_BOOL(webp_lossless)},
     {"webp-quality", OPT_INT(webp_quality), M_RANGE(0, 100)},
     {"webp-compression", OPT_INT(webp_compression), M_RANGE(0, 6)},
+#if HAVE_JPEGXL
     {"jxl-distance", OPT_DOUBLE(jxl_distance), M_RANGE(0.0, 15.0)},
     {"jxl-effort", OPT_INT(jxl_effort), M_RANGE(1, 9)},
+#endif
+#if HAVE_AVIF_MUXER
     {"avif-encoder", OPT_STRING(avif_encoder)},
     {"avif-opts", OPT_KEYVALUELIST(avif_opts)},
     {"avif-pixfmt", OPT_STRING(avif_pixfmt)},
+#endif
     {"high-bit-depth", OPT_BOOL(high_bit_depth)},
     {"tag-colorspace", OPT_BOOL(tag_csp)},
     {0},
@@ -128,18 +136,19 @@ static void prepare_avframe(AVFrame *pic, AVCodecContext *avctx,
     pic->format = avctx->pix_fmt;
     pic->width = avctx->width;
     pic->height = avctx->height;
-    pl_avframe_set_repr(pic, image->params.repr);
-    avctx->colorspace = pic->colorspace;
-    avctx->color_range = pic->color_range;
+    avctx->color_range = pic->color_range =
+        mp_csp_levels_to_avcol_range(image->params.color.levels);
 
     if (!tag_csp)
         return;
-    pl_avframe_set_color(pic, image->params.color);
-    avctx->color_primaries = pic->color_primaries;
-    avctx->color_trc = pic->color_trc;
+    avctx->color_primaries = pic->color_primaries =
+        mp_csp_prim_to_avcol_pri(image->params.color.primaries);
+    avctx->color_trc = pic->color_trc =
+        mp_csp_trc_to_avcol_trc(image->params.color.gamma);
+    avctx->colorspace = pic->colorspace =
+        mp_csp_to_avcol_spc(image->params.color.space);
     avctx->chroma_sample_location = pic->chroma_location =
-        pl_chroma_to_av(image->params.chroma_location);
-
+        mp_chroma_location_to_av(image->params.chroma_location);
     mp_dbg(log, "mapped color params:\n"
         "  trc = %s\n"
         "  primaries = %s\n"
@@ -154,8 +163,14 @@ static void prepare_avframe(AVFrame *pic, AVCodecContext *avctx,
     );
 }
 
-static bool write_lavc(struct image_writer_ctx *ctx, mp_image_t *image, FILE *fp)
+static bool write_lavc(struct image_writer_ctx *ctx, mp_image_t *image, const char *filename)
 {
+    FILE *fp = fopen(filename, "wb");
+    if (!fp) {
+        MP_ERR(ctx, "Error opening '%s' for writing!\n", filename);
+        return false;
+    }
+
     bool success = false;
     AVFrame *pic = NULL;
     AVPacket *pkt = NULL;
@@ -180,7 +195,7 @@ static bool write_lavc(struct image_writer_ctx *ctx, mp_image_t *image, FILE *fp
     avctx->pix_fmt = imgfmt2pixfmt(image->imgfmt);
     if (codec->id == AV_CODEC_ID_MJPEG) {
         // Annoying deprecated garbage for the jpg encoder.
-        if (image->params.repr.levels == PL_COLOR_LEVELS_FULL)
+        if (image->params.color.levels == MP_CSP_LEVELS_PC)
             avctx->pix_fmt = replace_j_format(avctx->pix_fmt);
     }
     if (avctx->pix_fmt == AV_PIX_FMT_NONE) {
@@ -202,15 +217,17 @@ static bool write_lavc(struct image_writer_ctx *ctx, mp_image_t *image, FILE *fp
                        AV_OPT_SEARCH_CHILDREN);
         av_opt_set_int(avctx, "quality", ctx->opts->webp_quality,
                        AV_OPT_SEARCH_CHILDREN);
+#if HAVE_JPEGXL
     } else if (codec->id == AV_CODEC_ID_JPEGXL) {
         av_opt_set_double(avctx, "distance", ctx->opts->jxl_distance,
                           AV_OPT_SEARCH_CHILDREN);
         av_opt_set_int(avctx, "effort", ctx->opts->jxl_effort,
                        AV_OPT_SEARCH_CHILDREN);
+#endif
     }
 
     if (avcodec_open2(avctx, codec, NULL) < 0) {
-    print_open_fail:
+     print_open_fail:
         MP_ERR(ctx, "Could not open libavcodec encoder for saving images\n");
         goto error_exit;
     }
@@ -243,22 +260,29 @@ error_exit:
     avcodec_free_context(&avctx);
     av_frame_free(&pic);
     av_packet_free(&pkt);
-    return success;
+    return !fclose(fp) && success;
 }
 
 #if HAVE_JPEG
 
 static void write_jpeg_error_exit(j_common_ptr cinfo)
 {
-    // NOTE: do not write error message, too much effort to connect the libjpeg
-    //       log callbacks with mplayer's log function mp_msp()
+  // NOTE: do not write error message, too much effort to connect the libjpeg
+  //       log callbacks with mplayer's log function mp_msp()
 
-    // Return control to the setjmp point
-    longjmp(*(jmp_buf*)cinfo->client_data, 1);
+  // Return control to the setjmp point
+  longjmp(*(jmp_buf*)cinfo->client_data, 1);
 }
 
-static bool write_jpeg(struct image_writer_ctx *ctx, mp_image_t *image, FILE *fp)
+static bool write_jpeg(struct image_writer_ctx *ctx, mp_image_t *image,
+                       const char *filename)
 {
+    FILE *fp = fopen(filename, "wb");
+    if (!fp) {
+        MP_ERR(ctx, "Error opening '%s' for writing!\n", filename);
+        return false;
+    }
+
     struct jpeg_compress_struct cinfo;
     struct jpeg_error_mgr jerr;
 
@@ -269,6 +293,7 @@ static bool write_jpeg(struct image_writer_ctx *ctx, mp_image_t *image, FILE *fp
     cinfo.client_data = &error_return_jmpbuf;
     if (setjmp(cinfo.client_data)) {
         jpeg_destroy_compress(&cinfo);
+        fclose(fp);
         return false;
     }
 
@@ -298,17 +323,19 @@ static bool write_jpeg(struct image_writer_ctx *ctx, mp_image_t *image, FILE *fp
         JSAMPROW row_pointer[1];
         row_pointer[0] = image->planes[0] +
                          (ptrdiff_t)cinfo.next_scanline * image->stride[0];
-        jpeg_write_scanlines(&cinfo, row_pointer, 1);
+        jpeg_write_scanlines(&cinfo, row_pointer,1);
     }
 
     jpeg_finish_compress(&cinfo);
 
     jpeg_destroy_compress(&cinfo);
 
-    return true;
+    return !fclose(fp);
 }
 
 #endif
+
+#if HAVE_AVIF_MUXER
 
 static void log_side_data(struct image_writer_ctx *ctx, AVPacketSideData *data,
                           size_t size)
@@ -327,7 +354,8 @@ static void log_side_data(struct image_writer_ctx *ctx, AVPacketSideData *data,
     }
 }
 
-static bool write_avif(struct image_writer_ctx *ctx, mp_image_t *image, FILE *fp)
+static bool write_avif(struct image_writer_ctx *ctx, mp_image_t *image,
+                       const char *filename)
 {
     const AVCodec *codec = NULL;
     const AVOutputFormat *ofmt = NULL;
@@ -395,8 +423,11 @@ static bool write_avif(struct image_writer_ctx *ctx, mp_image_t *image, FILE *fp
         goto free_data;
     }
 
-    avio_open_dyn_buf(&avioctx);
-    MP_HANDLE_OOM(avioctx);
+    ret = avio_open(&avioctx, filename, AVIO_FLAG_WRITE);
+    if (ret < 0) {
+        MP_ERR(ctx, "Could not open file '%s' for saving images\n", filename);
+        goto free_data;
+    }
 
     fmtctx = avformat_alloc_context();
     if (!fmtctx) {
@@ -474,12 +505,10 @@ static bool write_avif(struct image_writer_ctx *ctx, mp_image_t *image, FILE *fp
     }
     MP_DBG(ctx, "write_avif(): avio_size() = %"PRIi64"\n", avio_size(avioctx));
 
-    uint8_t *buf = NULL;
-    int written_size = avio_close_dyn_buf(avioctx, &buf);
-    success = fwrite(buf, written_size, 1, fp) == 1;
-    av_freep(&buf);
+    success = true;
 
 free_data:
+    success = !avio_closep(&avioctx) && success;
     avformat_free_context(fmtctx);
     avcodec_free_context(&avctx);
     av_packet_free(&pkt);
@@ -487,6 +516,8 @@ free_data:
 
     return success;
 }
+
+#endif
 
 static int get_encoder_format(const AVCodec *codec, int srcfmt, bool highdepth)
 {
@@ -521,10 +552,8 @@ static int get_target_format(struct image_writer_ctx *ctx)
     int srcfmt = ctx->original_format.id;
 
     int target = get_encoder_format(codec, srcfmt, ctx->opts->high_bit_depth);
-    if (!target) {
-        mp_dbg(ctx->log, "Falling back to high-depth format.\n");
+    if (!target)
         target = get_encoder_format(codec, srcfmt, true);
-    }
 
     if (!target)
         goto unknown;
@@ -548,17 +577,31 @@ const char *image_writer_file_ext(const struct image_writer_opts *opts)
 bool image_writer_high_depth(const struct image_writer_opts *opts)
 {
     return opts->format == AV_CODEC_ID_PNG
+#if HAVE_JPEGXL
            || opts->format == AV_CODEC_ID_JPEGXL
-           || opts->format == AV_CODEC_ID_AV1;
+#endif
+#if HAVE_AVIF_MUXER
+           || opts->format == AV_CODEC_ID_AV1
+#endif
+    ;
 }
 
 bool image_writer_flexible_csp(const struct image_writer_opts *opts)
 {
     if (!opts->tag_csp)
         return false;
-    return opts->format == AV_CODEC_ID_JPEGXL
+    return false
+#if HAVE_JPEGXL
+        || opts->format == AV_CODEC_ID_JPEGXL
+#endif
+#if HAVE_AVIF_MUXER
         || opts->format == AV_CODEC_ID_AV1
-        || opts->format == AV_CODEC_ID_PNG;
+#endif
+#if LIBAVCODEC_VERSION_INT >= AV_VERSION_INT(59, 58, 100)
+        // This version added support for cICP tag writing
+        || opts->format == AV_CODEC_ID_PNG
+#endif
+    ;
 }
 
 int image_writer_format_from_ext(const char *ext)
@@ -571,7 +614,7 @@ int image_writer_format_from_ext(const char *ext)
 }
 
 static struct mp_image *convert_image(struct mp_image *image, int destfmt,
-                                      enum pl_color_levels yuv_levels,
+                                      enum mp_csp_levels yuv_levels,
                                       const struct image_writer_opts *opts,
                                       struct mpv_global *global,
                                       struct mp_log *log)
@@ -586,22 +629,19 @@ static struct mp_image *convert_image(struct mp_image *image, int destfmt,
         .p_w = 1,
         .p_h = 1,
         .color = image->params.color,
-        .repr = image->params.repr,
-        .chroma_location = image->params.chroma_location,
-        .crop = {0, 0, d_w, d_h},
     };
     mp_image_params_guess_csp(&p);
 
     if (!image_writer_flexible_csp(opts)) {
-        // If our format can't tag csps, set something sane
-        p.color.primaries = PL_COLOR_PRIM_BT_709;
-        p.color.transfer = PL_COLOR_TRC_UNKNOWN;
-        p.light = MP_CSP_LIGHT_DISPLAY;
-        p.color.hdr = (struct pl_hdr_metadata){0};
-        if (p.repr.sys != PL_COLOR_SYSTEM_RGB) {
-            p.repr.levels = yuv_levels;
-            p.repr.sys = PL_COLOR_SYSTEM_BT_601;
-            p.chroma_location = PL_CHROMA_CENTER;
+        // Formats that don't support non-sRGB csps should be forced to sRGB
+        p.color.primaries = MP_CSP_PRIM_BT_709;
+        p.color.gamma = MP_CSP_TRC_SRGB;
+        p.color.light = MP_CSP_LIGHT_DISPLAY;
+        p.color.sig_peak = 0;
+        if (p.color.space != MP_CSP_RGB) {
+            p.color.levels = yuv_levels;
+            p.color.space = MP_CSP_BT_601;
+            p.chroma_location = MP_CHROMA_CENTER;
         }
         mp_image_params_guess_csp(&p);
     }
@@ -609,27 +649,12 @@ static struct mp_image *convert_image(struct mp_image *image, int destfmt,
     if (mp_image_params_equal(&p, &image->params))
         return mp_image_new_ref(image);
 
-    mp_verbose(log, "will convert image to %s\n", mp_imgfmt_to_name(p.imgfmt));
-
-    struct mp_image *src = image;
-    if (mp_image_crop_valid(&src->params) &&
-        (mp_rect_w(src->params.crop) != src->w ||
-         mp_rect_h(src->params.crop) != src->h))
-    {
-        src = mp_image_new_ref(src);
-        if (!src) {
-            mp_err(log, "mp_image_new_ref failed!\n");
-            return NULL;
-        }
-        mp_image_crop_rc(src, src->params.crop);
-    }
-
     struct mp_image *dst = mp_image_alloc(p.imgfmt, p.w, p.h);
     if (!dst) {
         mp_err(log, "Out of memory.\n");
         return NULL;
     }
-    mp_image_copy_attributes(dst, src);
+    mp_image_copy_attributes(dst, image);
 
     dst->params = p;
 
@@ -637,11 +662,8 @@ static struct mp_image *convert_image(struct mp_image *image, int destfmt,
     sws->log = log;
     if (global)
         mp_sws_enable_cmdline_opts(sws, global);
-    bool ok = mp_sws_scale(sws, dst, src) >= 0;
+    bool ok = mp_sws_scale(sws, dst, image) >= 0;
     talloc_free(sws);
-
-    if (src != image)
-        talloc_free(src);
 
     if (!ok) {
         mp_err(log, "Error when converting image.\n");
@@ -654,16 +676,14 @@ static struct mp_image *convert_image(struct mp_image *image, int destfmt,
 
 bool write_image(struct mp_image *image, const struct image_writer_opts *opts,
                  const char *filename, struct mpv_global *global,
-                 struct mp_log *log, bool overwrite)
+                 struct mp_log *log)
 {
     struct image_writer_opts defs = image_writer_opts_defaults;
     if (!opts)
         opts = &defs;
 
-    mp_verbose(log, "input: %s\n", mp_image_params_to_str(&image->params));
-
     struct image_writer_ctx ctx = { log, opts, image->fmt };
-    bool (*write)(struct image_writer_ctx *, mp_image_t *, FILE *) = write_lavc;
+    bool (*write)(struct image_writer_ctx *, mp_image_t *, const char *) = write_lavc;
     int destfmt = 0;
 
 #if HAVE_JPEG
@@ -672,11 +692,13 @@ bool write_image(struct mp_image *image, const struct image_writer_opts *opts,
         destfmt = IMGFMT_RGB24;
     }
 #endif
+#if HAVE_AVIF_MUXER
     if (opts->format == AV_CODEC_ID_AV1) {
         write = write_avif;
-        if (opts->avif_pixfmt && opts->avif_pixfmt[0])
-            destfmt = mp_imgfmt_from_name(bstr0(opts->avif_pixfmt));
-    } else if (opts->format == AV_CODEC_ID_WEBP && !opts->webp_lossless) {
+        destfmt = mp_imgfmt_from_name(bstr0(opts->avif_pixfmt));
+    }
+#endif
+    if (opts->format == AV_CODEC_ID_WEBP && !opts->webp_lossless) {
         // For lossy images, libwebp has its own RGB->YUV conversion.
         // We don't want that, so force YUV/YUVA here.
         int alpha = image->fmt.flags & MP_IMGFLAG_ALPHA;
@@ -686,32 +708,21 @@ bool write_image(struct mp_image *image, const struct image_writer_opts *opts,
     if (!destfmt)
         destfmt = get_target_format(&ctx);
 
-    enum pl_color_levels levels; // Ignored if destfmt is a RGB format
+    enum mp_csp_levels levels; // Ignored if destfmt is a RGB format
     if (opts->format == AV_CODEC_ID_WEBP) {
-        levels = PL_COLOR_LEVELS_LIMITED;
+        levels = MP_CSP_LEVELS_TV;
     } else {
-        levels = PL_COLOR_LEVELS_FULL;
+        levels = MP_CSP_LEVELS_PC;
     }
 
     struct mp_image *dst = convert_image(image, destfmt, levels, opts, global, log);
     if (!dst)
         return false;
 
-    bool success = false;
-    FILE *fp = fopen(filename, overwrite ? "wb" : "wbx");
-    if (!fp) {
-        mp_err(log, "Error creating '%s' for writing: %s!\n",
-               filename, mp_strerror(errno));
-        goto done;
-    }
-
-    success = write(&ctx, dst, fp);
-    if (fclose(fp) || !success) {
+    bool success = write(&ctx, dst, filename);
+    if (!success)
         mp_err(log, "Error writing file '%s'!\n", filename);
-        unlink(filename);
-    }
 
-done:
     talloc_free(dst);
     return success;
 }
@@ -720,5 +731,5 @@ void dump_png(struct mp_image *image, const char *filename, struct mp_log *log)
 {
     struct image_writer_opts opts = image_writer_opts_defaults;
     opts.format = AV_CODEC_ID_PNG;
-    write_image(image, &opts, filename, NULL, log, true);
+    write_image(image, &opts, filename, NULL, log);
 }

@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
 import os, sys, json, subprocess, re
-from typing import Dict, Tuple, Callable, Optional
 
 def call(cmd) -> str:
 	sys.stdout.flush()
 	ret = subprocess.run(cmd, check=True, stdout=subprocess.PIPE, text=True)
 	return ret.stdout
 
-lint_rules: Dict[str, Tuple[Callable, str]] = {}
+lint_rules = {}
 
 def lint_rule(description: str):
 	def f(func):
@@ -15,7 +14,7 @@ def lint_rule(description: str):
 		lint_rules[func.__name__] = (func, description)
 	return f
 
-def get_commit_range() -> Optional[str]:
+def get_commit_range() -> str:
 	if len(sys.argv) > 1:
 		return sys.argv[1]
 	# https://github.com/actions/runner/issues/342#issuecomment-590670059
@@ -29,10 +28,9 @@ def get_commit_range() -> Optional[str]:
 		return event["before"] + "..." + event["after"]
 	elif event_name == "pull_request":
 		return event["pull_request"]["base"]["sha"] + ".." + event["pull_request"]["head"]["sha"]
-	return None
 
 def do_lint(commit_range: str) -> bool:
-	commits = call(["git", "log", "--pretty=format:%H %s", commit_range]).splitlines()
+	commits = call(["git", "log", "--pretty=format:%h %s", commit_range]).splitlines()
 	print(f"Linting {len(commits)} commit(s):")
 	any_failed = False
 	for commit in commits:
@@ -58,18 +56,25 @@ def do_lint(commit_range: str) -> bool:
 
 ################################################################################
 
-NO_PREFIX_WHITELIST = r"^Revert \"(.*)\"|^Reapply \"(.*)\"|^Release [0-9]|^Update VERSION$"
+NO_PREFIX_WHITELIST = r"^Revert \"(.*)\"|^Release [0-9]|^Update VERSION$"
 
 @lint_rule("Subject line must contain a prefix identifying the sub system")
 def subsystem_prefix(body):
-	return (re.search(NO_PREFIX_WHITELIST, body[0]) or
-			re.search(r"^[\w/\.{},-]+: ", body[0]))
+	if re.search(NO_PREFIX_WHITELIST, body[0]):
+		return True
+	m = re.search(r"^([^:]+):\s", body[0])
+	if not m:
+		return False
+	# a comma-separated list is okay
+	s = re.sub(r",\s+", "", m.group(1))
+	# but no spaces otherwise
+	return not " " in s
 
 @lint_rule("First word after : must be lower case")
 def description_lowercase(body):
-	# Allow all caps for acronyms and options with --
-	return (re.search(NO_PREFIX_WHITELIST, body[0]) or
-			re.search(r": (?:[A-Z]{2,} |--[a-z]|[a-z0-9])", body[0]))
+	if re.search(NO_PREFIX_WHITELIST, body[0]):
+		return True
+	return re.search(r":\s+[a-z0-9]", body[0])
 
 @lint_rule("Subject line must not end with a full stop")
 def no_dot(body):
@@ -90,12 +95,11 @@ def no_merge(body):
 
 @lint_rule("Subject line should be shorter than 72 characters")
 def line_too_long(body):
-	revert = re.search(r"^Revert \"(.*)\"|^Reapply \"(.*)\"", body[0])
-	return True if revert else len(body[0]) <= 72
+	return len(body[0]) <= 72
 
 @lint_rule("Prefix should not include C file extensions (use `vo_gpu: ...` not `vo_gpu.c: ...`)")
 def no_file_exts(body):
-	return not re.search(r"[a-z0-9]\.[ch]: ", body[0])
+	return not re.search(r"[a-z0-9]\.[ch]:\s", body[0])
 
 ################################################################################
 

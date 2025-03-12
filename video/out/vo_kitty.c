@@ -340,9 +340,8 @@ static int preinit(struct vo *vo)
     mp_sws_enable_cmdline_opts(p->sws, vo->global);
 
 #if HAVE_POSIX
-    struct sigaction sa = {
-        .sa_handler = handle_winch,
-    };
+    struct sigaction sa;
+    sa.sa_handler = handle_winch;
     sigaction(SIGWINCH, &sa, &saved_sigaction);
 #endif
 
@@ -362,7 +361,6 @@ static int preinit(struct vo *vo)
 #endif
 
     write_str(TERM_ESC_HIDE_CURSOR);
-    terminal_set_mouse_input(true);
     if (p->opts.alt_screen)
         write_str(TERM_ESC_ALT_SCREEN);
 
@@ -390,7 +388,6 @@ static void uninit(struct vo *vo)
 #endif
 
     write_str(TERM_ESC_RESTORE_CURSOR);
-    terminal_set_mouse_input(false);
 
     if (p->opts.alt_screen) {
         write_str(TERM_ESC_NORMAL_SCREEN);

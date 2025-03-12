@@ -38,7 +38,7 @@ static int m_property_multiply(struct mp_log *log,
                                const struct m_property *prop_list,
                                const char *property, double f, void *ctx)
 {
-    union m_option_value val = m_option_value_default;
+    union m_option_value val = {0};
     struct m_option opt = {0};
     int r;
 
@@ -98,7 +98,7 @@ static int do_action(const struct m_property *prop_list, const char *name,
 int m_property_do(struct mp_log *log, const struct m_property *prop_list,
                   const char *name, int action, void *arg, void *ctx)
 {
-    union m_option_value val = m_option_value_default;
+    union m_option_value val = {0};
     int r;
 
     struct m_option opt = {0};
@@ -108,14 +108,13 @@ int m_property_do(struct mp_log *log, const struct m_property *prop_list,
     assert(opt.type);
 
     switch (action) {
-    case M_PROPERTY_FIXED_LEN_PRINT:
     case M_PROPERTY_PRINT: {
-        if ((r = do_action(prop_list, name, action, arg, ctx)) >= 0)
+        if ((r = do_action(prop_list, name, M_PROPERTY_PRINT, arg, ctx)) >= 0)
             return r;
         // Fallback to m_option
         if ((r = do_action(prop_list, name, M_PROPERTY_GET, &val, ctx)) <= 0)
             return r;
-        char *str = m_option_pretty_print(&opt, &val, action == M_PROPERTY_FIXED_LEN_PRINT);
+        char *str = m_option_pretty_print(&opt, &val);
         m_option_free(&opt, &val);
         *(char **)arg = str;
         return str != NULL;
@@ -259,13 +258,11 @@ static int expand_property(const struct m_property *prop_list, char **ret,
     bool cond_no = !cond_yes && bstr_eatstart0(&prop, "!");
     bool test = cond_yes || cond_no;
     bool raw = bstr_eatstart0(&prop, "=");
-    bool fixed_len = !raw && bstr_eatstart0(&prop, ">");
     bstr comp_with = {0};
     bool comp = test && bstr_split_tok(prop, "==", &prop, &comp_with);
     if (test && !comp)
         raw = true;
     int method = raw ? M_PROPERTY_GET_STRING : M_PROPERTY_PRINT;
-    method = fixed_len ? M_PROPERTY_FIXED_LEN_PRINT : method;
 
     char *s = NULL;
     int r = m_property_do_bstr(prop_list, prop, method, &s, ctx);
@@ -435,23 +432,6 @@ int m_property_strdup_ro(int action, void* arg, const char *var)
     return M_PROPERTY_NOT_IMPLEMENTED;
 }
 
-int m_property_read_sub_validate(void *ctx, struct m_property *prop,
-                                 int action, void *arg)
-{
-    m_property_unkey(&action, &arg);
-    switch (action) {
-    case M_PROPERTY_GET_TYPE:
-        *(struct m_option *)arg = (struct m_option){.type = CONF_TYPE_NODE};
-        return M_PROPERTY_OK;
-    case M_PROPERTY_GET:
-    case M_PROPERTY_PRINT:
-    case M_PROPERTY_KEY_ACTION:
-        return M_PROPERTY_VALID;
-    default:
-        return M_PROPERTY_NOT_IMPLEMENTED;
-    };
-}
-
 // This allows you to make a list of values (like from a struct) available
 // as a number of sub-properties. The property list is set up with the current
 // property values on the stack before calling this function.
@@ -565,7 +545,7 @@ int m_property_read_list(int action, void *arg, int count,
                 r = get_item(n, M_PROPERTY_GET_TYPE, &opt, ctx);
                 if (r != M_PROPERTY_OK)
                     goto err;
-                union m_option_value val = m_option_value_default;
+                union m_option_value val = {0};
                 r = get_item(n, M_PROPERTY_GET, &val, ctx);
                 if (r != M_PROPERTY_OK)
                     goto err;

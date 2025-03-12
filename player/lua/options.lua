@@ -12,7 +12,7 @@ local function typeconv(desttypeval, val)
             val = nil
         end
     elseif type(desttypeval) == "number" then
-        if tonumber(val) ~= nil then
+        if not (tonumber(val) == nil) then
             val = tonumber(val)
         else
             msg.error("Error: Can't convert '" .. val .. "' to number!")
@@ -72,9 +72,13 @@ local function read_options(options, identifier, on_update)
             if line:sub(#line) == "\r" then
                 line = line:sub(1, #line - 1)
             end
-            if string.find(line, "#") ~= 1 then
+            if string.find(line, "#") == 1 then
+
+            else
                 local eqpos = string.find(line, "=")
-                if eqpos ~= nil then
+                if eqpos == nil then
+
+                else
                     local key = string.sub(line, 1, eqpos-1)
                     local val = string.sub(line, eqpos+1)
 
@@ -104,7 +108,7 @@ local function read_options(options, identifier, on_update)
     -- command line options are always applied on top of these
     local conf_and_default_opts = opt_table_copy(options)
 
-    local function parse_opts(full, opt)
+    local function parse_opts(full, options)
         for key, val in pairs(full) do
             if string.find(key, prefix, 1, true) == 1 then
                 key = string.sub(key, string.len(prefix)+1)
@@ -118,7 +122,7 @@ local function read_options(options, identifier, on_update)
                         msg.error("script-opts: error converting value '" .. val ..
                             "' for key '" .. key .. "'")
                     else
-                        opt[key] = convval
+                        options[key] = convval
                     end
                 end
             end
@@ -132,15 +136,15 @@ local function read_options(options, identifier, on_update)
     if on_update then
         local last_opts = opt_table_copy(options)
 
-        mp.observe_property("options/script-opts", "native", function(_, val)
+        mp.observe_property("options/script-opts", "native", function(name, val)
             local new_opts = opt_table_copy(conf_and_default_opts)
             parse_opts(val, new_opts)
             local changelist = {}
-            for k, v in pairs(new_opts) do
-                if not opt_equal(last_opts[k], v) then
+            for key, val in pairs(new_opts) do
+                if not opt_equal(last_opts[key], val) then
                     -- copy to user
-                    options[k] = opt_copy(v)
-                    changelist[k] = true
+                    options[key] = opt_copy(val)
+                    changelist[key] = true
                 end
             end
             last_opts = new_opts

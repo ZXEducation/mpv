@@ -28,14 +28,14 @@
 #include "osdep/semaphore.h"
 #include "audio/format.h"
 
-#if HAVE_COREAUDIO || HAVE_AVFOUNDATION
+#if HAVE_COREAUDIO
 #include "audio/out/ao_coreaudio_properties.h"
 #include <CoreAudio/HostTime.h>
 #else
 #include <mach/mach_time.h>
 #endif
 
-#if HAVE_COREAUDIO || HAVE_AVFOUNDATION
+#if HAVE_COREAUDIO
 static bool ca_is_output_device(struct ao *ao, AudioDeviceID dev)
 {
     size_t n_buffers;
@@ -138,8 +138,7 @@ bool check_ca_st(struct ao *ao, int level, OSStatus code, const char *message)
 {
     if (code == noErr) return true;
 
-    if (ao)
-        mp_msg(ao->log, level, "%s (%s/%d)\n", message, mp_tag_str(code), (int)code);
+    mp_msg(ao->log, level, "%s (%s/%d)\n", message, mp_tag_str(code), (int)code);
 
     return false;
 }
@@ -236,20 +235,20 @@ void ca_print_asbd(struct ao *ao, const char *description,
     int mpfmt       = ca_asbd_to_mp_format(asbd);
 
     MP_VERBOSE(ao,
-        "%s %7.1fHz %" PRIu32 "bit %s "
-        "[%" PRIu32 "][%" PRIu32 "bpp][%" PRIu32 "fbp]"
-        "[%" PRIu32 "bpf][%" PRIu32 "ch] "
-        "%s %s %s%s%s%s (%s)\n",
-        description, asbd->mSampleRate, asbd->mBitsPerChannel, format,
-        asbd->mFormatFlags, asbd->mBytesPerPacket, asbd->mFramesPerPacket,
-        asbd->mBytesPerFrame, asbd->mChannelsPerFrame,
-        (flags & kAudioFormatFlagIsFloat) ? "float" : "int",
-        (flags & kAudioFormatFlagIsBigEndian) ? "BE" : "LE",
-        (flags & kAudioFormatFlagIsSignedInteger) ? "S" : "U",
-        (flags & kAudioFormatFlagIsPacked) ? " packed" : "",
-        (flags & kAudioFormatFlagIsAlignedHigh) ? " aligned" : "",
-        (flags & kAudioFormatFlagIsNonInterleaved) ? " P" : "",
-        mpfmt ? af_fmt_to_str(mpfmt) : "-");
+       "%s %7.1fHz %" PRIu32 "bit %s "
+       "[%" PRIu32 "][%" PRIu32 "bpp][%" PRIu32 "fbp]"
+       "[%" PRIu32 "bpf][%" PRIu32 "ch] "
+       "%s %s %s%s%s%s (%s)\n",
+       description, asbd->mSampleRate, asbd->mBitsPerChannel, format,
+       asbd->mFormatFlags, asbd->mBytesPerPacket, asbd->mFramesPerPacket,
+       asbd->mBytesPerFrame, asbd->mChannelsPerFrame,
+       (flags & kAudioFormatFlagIsFloat) ? "float" : "int",
+       (flags & kAudioFormatFlagIsBigEndian) ? "BE" : "LE",
+       (flags & kAudioFormatFlagIsSignedInteger) ? "S" : "U",
+       (flags & kAudioFormatFlagIsPacked) ? " packed" : "",
+       (flags & kAudioFormatFlagIsAlignedHigh) ? " aligned" : "",
+       (flags & kAudioFormatFlagIsNonInterleaved) ? " P" : "",
+       mpfmt ? af_fmt_to_str(mpfmt) : "-");
 }
 
 // Return whether new is an improvement over old. Assume a higher value means
@@ -293,21 +292,21 @@ bool ca_asbd_is_better(AudioStreamBasicDescription *req,
     return true;
 }
 
-int64_t ca_frames_to_ns(struct ao *ao, uint32_t frames)
+int64_t ca_frames_to_us(struct ao *ao, uint32_t frames)
 {
-    return MP_TIME_S_TO_NS(frames / (double)ao->samplerate);
+    return frames / (float) ao->samplerate * 1e6;
 }
 
 int64_t ca_get_latency(const AudioTimeStamp *ts)
 {
-#if HAVE_COREAUDIO || HAVE_AVFOUNDATION
+#if HAVE_COREAUDIO
     uint64_t out = AudioConvertHostTimeToNanos(ts->mHostTime);
     uint64_t now = AudioConvertHostTimeToNanos(AudioGetCurrentHostTime());
 
     if (now > out)
         return 0;
 
-    return out - now;
+    return (out - now) * 1e-3;
 #else
     static mach_timebase_info_data_t timebase;
     if (timebase.denom == 0)
@@ -319,11 +318,11 @@ int64_t ca_get_latency(const AudioTimeStamp *ts)
     if (now > out)
         return 0;
 
-    return (out - now) * timebase.numer / timebase.denom;
+    return (out - now) * timebase.numer / timebase.denom / 1e3;
 #endif
 }
 
-#if HAVE_COREAUDIO || HAVE_AVFOUNDATION
+#if HAVE_COREAUDIO
 bool ca_stream_supports_compressed(struct ao *ao, AudioStreamID stream)
 {
     AudioStreamRangedDescription *formats = NULL;
@@ -423,7 +422,7 @@ OSStatus ca_enable_mixing(struct ao *ao, AudioDeviceID device, bool changed)
     return noErr;
 }
 
-int64_t ca_get_device_latency_ns(struct ao *ao, AudioDeviceID device)
+int64_t ca_get_device_latency_us(struct ao *ao, AudioDeviceID device)
 {
     uint32_t latency_frames = 0;
     uint32_t latency_properties[] = {
@@ -450,7 +449,7 @@ int64_t ca_get_device_latency_ns(struct ao *ao, AudioDeviceID device)
         MP_VERBOSE(ao, "Device sample rate: %f\n", sample_rate);
     }
 
-    return MP_TIME_S_TO_NS(latency_frames / sample_rate);
+    return latency_frames / sample_rate * 1e6;
 }
 
 static OSStatus ca_change_format_listener(
@@ -458,8 +457,8 @@ static OSStatus ca_change_format_listener(
     const AudioObjectPropertyAddress addresses[],
     void *data)
 {
-    mp_sem_t *sem = data;
-    mp_sem_post(sem);
+    sem_t *sem = data;
+    sem_post(sem);
     return noErr;
 }
 
@@ -471,9 +470,11 @@ bool ca_change_physical_format_sync(struct ao *ao, AudioStreamID stream,
 
     ca_print_asbd(ao, "setting stream physical format:", &change_format);
 
-    mp_sem_t wakeup;
-    if (mp_sem_init(&wakeup, 0, 0))
-        MP_HANDLE_OOM(0);
+    sem_t wakeup;
+    if (sem_init(&wakeup, 0, 0)) {
+        MP_WARN(ao, "OOM\n");
+        return false;
+    }
 
     AudioStreamBasicDescription prev_format;
     err = CA_GET(stream, kAudioStreamPropertyPhysicalFormat, &prev_format);
@@ -499,7 +500,7 @@ bool ca_change_physical_format_sync(struct ao *ao, AudioStreamID stream,
 
     /* The AudioStreamSetProperty is not only asynchronous,
      * it is also not Atomic, in its behaviour. */
-    int64_t wait_until = mp_time_ns() + MP_TIME_S_TO_NS(2);
+    struct timespec timeout = mp_rel_time_to_timespec(2.0);
     AudioStreamBasicDescription actual_format = {0};
     while (1) {
         err = CA_GET(stream, kAudioStreamPropertyPhysicalFormat, &actual_format);
@@ -510,7 +511,7 @@ bool ca_change_physical_format_sync(struct ao *ao, AudioStreamID stream,
         if (format_set)
             break;
 
-        if (mp_sem_timedwait(&wakeup, wait_until)) {
+        if (sem_timedwait(&wakeup, &timeout)) {
             MP_VERBOSE(ao, "reached timeout\n");
             break;
         }
@@ -532,7 +533,7 @@ bool ca_change_physical_format_sync(struct ao *ao, AudioStreamID stream,
     CHECK_CA_ERROR("can't remove property listener");
 
 coreaudio_error:
-    mp_sem_destroy(&wakeup);
+    sem_destroy(&wakeup);
     return format_set;
 }
 #endif

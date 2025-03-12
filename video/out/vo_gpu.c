@@ -80,16 +80,11 @@ static void draw_frame(struct vo *vo, struct vo_frame *frame)
     if (!sw->fns->start_frame(sw, &fbo))
         return;
 
-    gl_video_render_frame(p->renderer, frame, &fbo, RENDER_FRAME_DEF);
+    gl_video_render_frame(p->renderer, frame, fbo, RENDER_FRAME_DEF);
     if (!sw->fns->submit_frame(sw, frame)) {
         MP_ERR(vo, "Failed presenting frame!\n");
         return;
     }
-
-    struct mp_image_params *params = gl_video_get_target_params_ptr(p->renderer);
-    mp_mutex_lock(&vo->params_mutex);
-    vo->target_params = params;
-    mp_mutex_unlock(&vo->params_mutex);
 }
 
 static void flip_page(struct vo *vo)
@@ -174,14 +169,13 @@ static void get_and_update_ambient_lighting(struct gpu_priv *p)
     }
 }
 
-static void update_ra_ctx_options(struct vo *vo, struct ra_ctx_opts *ctx_opts)
+static void update_ra_ctx_options(struct vo *vo)
 {
     struct gpu_priv *p = vo->priv;
+
+    /* Only the alpha option has any runtime toggle ability. */
     struct gl_video_opts *gl_opts = mp_get_config_group(p->ctx, vo->global, &gl_video_conf);
-    ctx_opts->want_alpha = (gl_opts->background == BACKGROUND_COLOR &&
-                            gl_opts->background_color.a != 255) ||
-                            gl_opts->background == BACKGROUND_NONE;
-    talloc_free(gl_opts);
+    p->ctx->opts.want_alpha = gl_opts->alpha_mode == 1;
 }
 
 static int control(struct vo *vo, uint32_t request, void *data)
@@ -191,6 +185,9 @@ static int control(struct vo *vo, uint32_t request, void *data)
     switch (request) {
     case VOCTRL_SET_PANSCAN:
         resize(vo);
+        return VO_TRUE;
+    case VOCTRL_SET_EQUALIZER:
+        vo->want_redraw = true;
         return VO_TRUE;
     case VOCTRL_SCREENSHOT: {
         struct vo_frame *frame = vo_get_current_vo_frame(vo);
@@ -203,14 +200,12 @@ static int control(struct vo *vo, uint32_t request, void *data)
         request_hwdec_api(vo, data);
         return true;
     case VOCTRL_UPDATE_RENDER_OPTS: {
-        struct ra_ctx_opts *ctx_opts = mp_get_config_group(vo, vo->global, &ra_ctx_conf);
-        update_ra_ctx_options(vo, ctx_opts);
+        update_ra_ctx_options(vo);
         gl_video_configure_queue(p->renderer, vo);
         get_and_update_icc_profile(p);
         if (p->ctx->fns->update_render_opts)
             p->ctx->fns->update_render_opts(p->ctx);
         vo->want_redraw = true;
-        talloc_free(ctx_opts);
         return true;
     }
     case VOCTRL_RESET:
@@ -257,13 +252,13 @@ static void wakeup(struct vo *vo)
         p->ctx->fns->wakeup(p->ctx);
 }
 
-static void wait_events(struct vo *vo, int64_t until_time_ns)
+static void wait_events(struct vo *vo, int64_t until_time_us)
 {
     struct gpu_priv *p = vo->priv;
     if (p->ctx && p->ctx->fns->wait_events) {
-        p->ctx->fns->wait_events(p->ctx, until_time_ns);
+        p->ctx->fns->wait_events(p->ctx, until_time_us);
     } else {
-        vo_wait_default(vo, until_time_ns);
+        vo_wait_default(vo, until_time_us);
     }
 }
 
@@ -293,9 +288,12 @@ static int preinit(struct vo *vo)
     p->log = vo->log;
 
     struct ra_ctx_opts *ctx_opts = mp_get_config_group(vo, vo->global, &ra_ctx_conf);
-    update_ra_ctx_options(vo, ctx_opts);
-    p->ctx = ra_ctx_create(vo, *ctx_opts);
+    struct gl_video_opts *gl_opts = mp_get_config_group(vo, vo->global, &gl_video_conf);
+    struct ra_ctx_opts opts = *ctx_opts;
+    opts.want_alpha = gl_opts->alpha_mode == 1;
+    p->ctx = ra_ctx_create(vo, opts);
     talloc_free(ctx_opts);
+    talloc_free(gl_opts);
     if (!p->ctx)
         goto err_out;
     assert(p->ctx->ra);

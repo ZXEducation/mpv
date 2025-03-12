@@ -3,14 +3,12 @@
 -- Also, this is based on a rather old version of the
 -- builtin mpv status line.
 
-local newStatus
-
 -- Add a string to the status line
-local function atsl(s)
+function atsl(s)
     newStatus = newStatus .. s
 end
 
-local function update_status_line()
+function update_status_line()
     -- Reset the status line
     newStatus = ""
 
@@ -43,7 +41,7 @@ local function update_status_line()
         atsl(string.format(" x%4.2f", r))
     end
 
-    r = mp.get_property_number("avsync")
+    r = mp.get_property_number("avsync", nil)
     if r ~= nil then
         atsl(string.format(" A-V: %f", r))
     end
@@ -80,9 +78,9 @@ local function update_status_line()
     mp.set_property("options/term-status-msg", newStatus)
 end
 
-local timer = mp.add_periodic_timer(1, update_status_line)
+timer = mp.add_periodic_timer(1, update_status_line)
 
-local function on_pause_change(_, value)
+function on_pause_change(name, value)
     if value == false then
         timer:resume()
     else

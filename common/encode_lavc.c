@@ -83,10 +83,25 @@ const struct m_sub_options encode_config = {
         {"ovcopts", OPT_KEYVALUELIST(vopts), .flags = M_OPT_HAVE_HELP},
         {"oac", OPT_STRING(acodec)},
         {"oacopts", OPT_KEYVALUELIST(aopts), .flags = M_OPT_HAVE_HELP},
+        {"ovoffset", OPT_FLOAT(voffset), M_RANGE(-1000000.0, 1000000.0),
+            .deprecation_message = "--audio-delay (once unbroken)"},
+        {"oaoffset", OPT_FLOAT(aoffset), M_RANGE(-1000000.0, 1000000.0),
+            .deprecation_message = "--audio-delay (once unbroken)"},
         {"orawts", OPT_BOOL(rawts)},
+        {"ovfirst", OPT_BOOL(video_first),
+            .deprecation_message = "no replacement"},
+        {"oafirst", OPT_BOOL(audio_first),
+            .deprecation_message = "no replacement"},
         {"ocopy-metadata", OPT_BOOL(copy_metadata)},
         {"oset-metadata", OPT_KEYVALUELIST(set_metadata)},
         {"oremove-metadata", OPT_STRINGLIST(remove_metadata)},
+
+        {"ocopyts", OPT_REMOVED("ocopyts is now the default")},
+        {"oneverdrop", OPT_REMOVED("no replacement")},
+        {"oharddup", OPT_REMOVED("use --vf-add=fps=VALUE")},
+        {"ofps", OPT_REMOVED("no replacement (use --vf-add=fps=VALUE for CFR)")},
+        {"oautofps", OPT_REMOVED("no replacement")},
+        {"omaxfps", OPT_REMOVED("no replacement")},
         {0}
     },
     .size = sizeof(struct encode_opts),
@@ -104,7 +119,7 @@ struct encode_lavc_context *encode_lavc_init(struct mpv_global *global)
         .priv = talloc_zero(ctx, struct encode_priv),
         .log = mp_log_new(ctx, global->log, "encode"),
     };
-    mp_mutex_init(&ctx->lock);
+    pthread_mutex_init(&ctx->lock, NULL);
 
     struct encode_priv *p = ctx->priv;
     p->log = ctx->log;
@@ -116,6 +131,12 @@ struct encode_lavc_context *encode_lavc_init(struct mpv_global *global)
     // ffmpeg.c works around this too, the same way
     if (!strcmp(filename, "-"))
         filename = "pipe:1";
+
+    if (filename && (
+            !strcmp(filename, "/dev/stdout") ||
+            !strcmp(filename, "pipe:") ||
+            !strcmp(filename, "pipe:1")))
+        mp_msg_force_stderr(global, true);
 
     encode_lavc_discontinuity(ctx);
 
@@ -151,7 +172,7 @@ void encode_lavc_set_metadata(struct encode_lavc_context *ctx,
 {
     struct encode_priv *p = ctx->priv;
 
-    mp_mutex_lock(&ctx->lock);
+    pthread_mutex_lock(&ctx->lock);
 
     if (ctx->options->copy_metadata) {
         p->metadata = mp_tags_dup(ctx, metadata);
@@ -178,7 +199,7 @@ void encode_lavc_set_metadata(struct encode_lavc_context *ctx,
         }
     }
 
-    mp_mutex_unlock(&ctx->lock);
+    pthread_mutex_unlock(&ctx->lock);
 }
 
 bool encode_lavc_free(struct encode_lavc_context *ctx)
@@ -214,7 +235,7 @@ bool encode_lavc_free(struct encode_lavc_context *ctx)
 
     res = !p->failed;
 
-    mp_mutex_destroy(&ctx->lock);
+    pthread_mutex_destroy(&ctx->lock);
     talloc_free(ctx);
 
     return res;
@@ -307,7 +328,7 @@ void encode_lavc_expect_stream(struct encode_lavc_context *ctx,
 {
     struct encode_priv *p = ctx->priv;
 
-    mp_mutex_lock(&ctx->lock);
+    pthread_mutex_lock(&ctx->lock);
 
     enum AVMediaType codec_type = mp_to_av_stream_type(type);
 
@@ -331,7 +352,7 @@ void encode_lavc_expect_stream(struct encode_lavc_context *ctx,
     MP_TARRAY_APPEND(p, p->streams, p->num_streams, dst);
 
 done:
-    mp_mutex_unlock(&ctx->lock);
+    pthread_mutex_unlock(&ctx->lock);
 }
 
 // Signal that you are ready to encode (you provide the codec params etc. too).
@@ -345,7 +366,7 @@ static void encode_lavc_add_stream(struct encoder_context *enc,
 {
     struct encode_priv *p = ctx->priv;
 
-    mp_mutex_lock(&ctx->lock);
+    pthread_mutex_lock(&ctx->lock);
 
     struct mux_stream *dst = find_mux_stream(ctx, info->codecpar->codec_type);
     if (!dst) {
@@ -381,7 +402,7 @@ static void encode_lavc_add_stream(struct encoder_context *enc,
     maybe_init_muxer(ctx);
 
 done:
-    mp_mutex_unlock(&ctx->lock);
+    pthread_mutex_unlock(&ctx->lock);
 }
 
 // Write a packet. This will take over ownership of `pkt`
@@ -392,7 +413,7 @@ static void encode_lavc_add_packet(struct mux_stream *dst, AVPacket *pkt)
 
     assert(dst->st);
 
-    mp_mutex_lock(&ctx->lock);
+    pthread_mutex_lock(&ctx->lock);
 
     if (p->failed)
         goto done;
@@ -429,7 +450,7 @@ static void encode_lavc_add_packet(struct mux_stream *dst, AVPacket *pkt)
     pkt = NULL;
 
 done:
-    mp_mutex_unlock(&ctx->lock);
+    pthread_mutex_unlock(&ctx->lock);
     if (pkt)
         av_packet_unref(pkt);
 }
@@ -444,9 +465,9 @@ void encode_lavc_discontinuity(struct encode_lavc_context *ctx)
     if (!ctx)
         return;
 
-    mp_mutex_lock(&ctx->lock);
+    pthread_mutex_lock(&ctx->lock);
     ctx->discontinuity_pts_offset = MP_NOPTS_VALUE;
-    mp_mutex_unlock(&ctx->lock);
+    pthread_mutex_unlock(&ctx->lock);
 }
 
 static void encode_lavc_printoptions(struct mp_log *log, const void *obj,
@@ -667,7 +688,7 @@ int encode_lavc_getstatus(struct encode_lavc_context *ctx,
     float minutes, megabytes, fps, x;
     float f = MPMAX(0.0001, relative_position);
 
-    mp_mutex_lock(&ctx->lock);
+    pthread_mutex_lock(&ctx->lock);
 
     if (p->failed) {
         snprintf(buf, bufsize, "(failed)\n");
@@ -691,7 +712,7 @@ int encode_lavc_getstatus(struct encode_lavc_context *ctx,
     buf[bufsize - 1] = 0;
 
 done:
-    mp_mutex_unlock(&ctx->lock);
+    pthread_mutex_unlock(&ctx->lock);
     return 0;
 }
 
@@ -699,9 +720,9 @@ bool encode_lavc_didfail(struct encode_lavc_context *ctx)
 {
     if (!ctx)
         return false;
-    mp_mutex_lock(&ctx->lock);
+    pthread_mutex_lock(&ctx->lock);
     bool fail = ctx->priv->failed;
-    mp_mutex_unlock(&ctx->lock);
+    pthread_mutex_unlock(&ctx->lock);
     return fail;
 }
 
@@ -710,7 +731,6 @@ static void encoder_destroy(void *ptr)
     struct encoder_context *p = ptr;
 
     av_packet_free(&p->pkt);
-    avcodec_parameters_free(&p->info.codecpar);
     avcodec_free_context(&p->encoder);
     free_stream(p->twopass_bytebuffer);
 }
@@ -864,8 +884,8 @@ bool encoder_init_codec_and_muxer(struct encoder_context *p,
                    "           ********************************************\n\n"
                    "This means the output file may be broken or bad.\n"
                    "Possible reasons, problems, workarounds:\n"
-                   "- Codec implementation in ffmpeg is not finished yet.\n"
-                   "     Try updating ffmpeg.\n"
+                   "- Codec implementation in ffmpeg/libav is not finished yet.\n"
+                   "     Try updating ffmpeg or libav.\n"
                    "- Bad picture quality, blocks, blurriness.\n"
                    "     Experiment with codec settings to maybe still get the\n"
                    "     desired quality output at the expense of bitrate.\n"
@@ -900,7 +920,7 @@ bool encoder_init_codec_and_muxer(struct encoder_context *p,
     return true;
 
 fail:
-    avcodec_free_context(&p->encoder);
+    avcodec_close(p->encoder);
     return false;
 }
 
@@ -940,17 +960,13 @@ fail:
     return false;
 }
 
-void encoder_update_log(struct mpv_global *global)
+double encoder_get_offset(struct encoder_context *p)
 {
-    struct encode_opts *options = mp_get_config_group(NULL, global, &encode_config);
-    if (options->file && (!strcmp(options->file, "-") ||
-                          !strcmp(options->file, "/dev/stdout") ||
-                          !strcmp(options->file, "pipe:") ||
-                          !strcmp(options->file, "pipe:1")))
-    {
-        mp_msg_force_stderr(global, true);
+    switch (p->encoder->codec_type) {
+    case AVMEDIA_TYPE_VIDEO: return p->options->voffset;
+    case AVMEDIA_TYPE_AUDIO: return p->options->aoffset;
+    default:                 return 0;
     }
-    talloc_free(options);
 }
 
 // vim: ts=4 sw=4 et

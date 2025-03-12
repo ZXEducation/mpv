@@ -22,14 +22,13 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <stdbool.h>
+#include <pthread.h>
 
 #include "av_log.h"
+#include "config.h"
 #include "common/common.h"
 #include "common/global.h"
 #include "common/msg.h"
-#include "config.h"
-#include "misc/bstr.h"
-#include "osdep/threads.h"
 
 #include <libavutil/avutil.h>
 #include <libavutil/log.h>
@@ -52,11 +51,10 @@
 
 // Needed because the av_log callback does not provide a library-safe message
 // callback.
-static mp_static_mutex log_lock = MP_STATIC_MUTEX_INITIALIZER;
+static pthread_mutex_t log_lock = PTHREAD_MUTEX_INITIALIZER;
 static struct mpv_global *log_mpv_instance;
 static struct mp_log *log_root, *log_decaudio, *log_decvideo, *log_demuxer;
 static bool log_print_prefix = true;
-static bstr log_buffer;
 
 static int av_log_level_to_mp_level(int av_level)
 {
@@ -82,7 +80,7 @@ static struct mp_log *get_av_log(void *ptr)
     if (!avc) {
         mp_warn(log_root,
                "av_log callback called with bad parameters (NULL AVClass).\n"
-               "This is a bug in one of FFmpeg libraries used.\n");
+               "This is a bug in one of Libav/FFmpeg libraries used.\n");
         return log_root;
     }
 
@@ -108,11 +106,6 @@ static struct mp_log *get_av_log(void *ptr)
     return log_root;
 }
 
-static const char *avclass_item_name(void *obj, const AVClass *avc)
-{
-    return (avc->item_name ? avc->item_name : av_default_item_name)(obj);
-}
-
 static void mp_msg_av_log_callback(void *ptr, int level, const char *fmt,
                                    va_list vl)
 {
@@ -120,10 +113,10 @@ static void mp_msg_av_log_callback(void *ptr, int level, const char *fmt,
     int mp_level = av_log_level_to_mp_level(level);
 
     // Note: mp_log is thread-safe, but destruction of the log instances is not.
-    mp_mutex_lock(&log_lock);
+    pthread_mutex_lock(&log_lock);
 
     if (!log_mpv_instance) {
-        mp_mutex_unlock(&log_lock);
+        pthread_mutex_unlock(&log_lock);
         // Fallback to stderr
         vfprintf(stderr, fmt, vl);
         return;
@@ -132,36 +125,34 @@ static void mp_msg_av_log_callback(void *ptr, int level, const char *fmt,
     struct mp_log *log = get_av_log(ptr);
 
     if (mp_msg_test(log, mp_level)) {
-        log_buffer.len = 0;
-        bstr_xappend_vasprintf(log_root, &log_buffer, fmt, vl);
-        if (!log_buffer.len)
-            goto done;
-        const char *prefix = avc ? avclass_item_name(ptr, avc) : NULL;
-        if (log_print_prefix && prefix) {
-            mp_msg(log, mp_level, "%s: %.*s", prefix, BSTR_P(log_buffer));
-        } else {
-            mp_msg(log, mp_level, "%.*s", BSTR_P(log_buffer));
-        }
-        log_print_prefix = log_buffer.start[log_buffer.len - 1] == '\n';
+        char buffer[4096] = "";
+        int pos = 0;
+        const char *prefix = avc ? avc->item_name(ptr) : NULL;
+        if (log_print_prefix && prefix)
+            pos = snprintf(buffer, sizeof(buffer), "%s: ", prefix);
+        log_print_prefix = fmt[strlen(fmt) - 1] == '\n';
+
+        pos = MPMIN(MPMAX(pos, 0), sizeof(buffer));
+        vsnprintf(buffer + pos, sizeof(buffer) - pos, fmt, vl);
+
+        mp_msg(log, mp_level, "%s", buffer);
     }
 
-done:
-    mp_mutex_unlock(&log_lock);
+    pthread_mutex_unlock(&log_lock);
 }
 
 void init_libav(struct mpv_global *global)
 {
-    mp_mutex_lock(&log_lock);
+    pthread_mutex_lock(&log_lock);
     if (!log_mpv_instance) {
         log_mpv_instance = global;
         log_root = mp_log_new(NULL, global->log, "ffmpeg");
         log_decaudio = mp_log_new(log_root, log_root, "audio");
         log_decvideo = mp_log_new(log_root, log_root, "video");
         log_demuxer = mp_log_new(log_root, log_root, "demuxer");
-        log_buffer = (bstr){0};
         av_log_set_callback(mp_msg_av_log_callback);
     }
-    mp_mutex_unlock(&log_lock);
+    pthread_mutex_unlock(&log_lock);
 
     avformat_network_init();
 
@@ -172,13 +163,13 @@ void init_libav(struct mpv_global *global)
 
 void uninit_libav(struct mpv_global *global)
 {
-    mp_mutex_lock(&log_lock);
+    pthread_mutex_lock(&log_lock);
     if (log_mpv_instance == global) {
         av_log_set_callback(av_log_default_callback);
         log_mpv_instance = NULL;
         talloc_free(log_root);
     }
-    mp_mutex_unlock(&log_lock);
+    pthread_mutex_unlock(&log_lock);
 }
 
 #define V(x) AV_VERSION_MAJOR(x), \
@@ -194,15 +185,12 @@ struct lib {
 void check_library_versions(struct mp_log *log, int v)
 {
     const struct lib libs[] = {
-        {"libavcodec",    LIBAVCODEC_VERSION_INT,    avcodec_version()},
-#if HAVE_LIBAVDEVICE
-        {"libavdevice",   LIBAVDEVICE_VERSION_INT,   avdevice_version()},
-#endif
-        {"libavfilter",   LIBAVFILTER_VERSION_INT,   avfilter_version()},
-        {"libavformat",   LIBAVFORMAT_VERSION_INT,   avformat_version()},
         {"libavutil",     LIBAVUTIL_VERSION_INT,     avutil_version()},
-        {"libswresample", LIBSWRESAMPLE_VERSION_INT, swresample_version()},
+        {"libavcodec",    LIBAVCODEC_VERSION_INT,    avcodec_version()},
+        {"libavformat",   LIBAVFORMAT_VERSION_INT,   avformat_version()},
         {"libswscale",    LIBSWSCALE_VERSION_INT,    swscale_version()},
+        {"libavfilter",   LIBAVFILTER_VERSION_INT,   avfilter_version()},
+        {"libswresample", LIBSWRESAMPLE_VERSION_INT, swresample_version()},
     };
 
     mp_msg(log, v, "FFmpeg version: %s\n", av_version_info());

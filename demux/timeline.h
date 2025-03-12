@@ -2,7 +2,6 @@
 #define MP_TIMELINE_H_
 
 #include "common/common.h"
-#include "misc/bstr.h"
 
 // Single segment in a timeline.
 struct timeline_part {

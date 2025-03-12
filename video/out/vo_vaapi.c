@@ -406,11 +406,18 @@ static void va_pool_set_allocator(struct mp_image_pool *pool,
     mp_image_pool_set_lru(pool);
 }
 
+static void flush_output_surfaces(struct priv *p)
+{
+    for (int n = 0; n < MAX_OUTPUT_SURFACES; n++)
+        mp_image_unrefp(&p->output_surfaces[n]);
+    p->output_surface = 0;
+    p->visible_surface = 0;
+}
+
 // See flush_surfaces() remarks - the same applies.
 static void free_video_specific(struct priv *p)
 {
-    p->output_surface = 0;
-    p->visible_surface = 0;
+    flush_output_surfaces(p);
 
     mp_image_unrefp(&p->black_surface);
 
@@ -423,6 +430,7 @@ static void free_video_specific(struct priv *p)
 
 static bool alloc_swdec_surfaces(struct priv *p, int w, int h, int imgfmt)
 {
+    free_video_specific(p);
     for (int i = 0; i < MAX_OUTPUT_SURFACES; i++) {
         p->swdec_surfaces[i] = mp_image_pool_get(p->pool, IMGFMT_VAAPI, w, h);
         if (va_surface_alloc_imgfmt(p, p->swdec_surfaces[i], imgfmt) < 0)
@@ -511,7 +519,7 @@ static bool render_to_screen(struct priv *p, struct mp_image *mpi)
         CHECK_VA_STATUS(p, "vaAssociateSubpicture()");
     }
 
-    int flags = va_get_colorspace_flag(p->image_params.repr.sys) |
+    int flags = va_get_colorspace_flag(p->image_params.color.space) |
                 p->scaling | VA_FRAME_PICTURE;
     status = vaPutSurface(p->display,
                           surface,
@@ -555,21 +563,23 @@ static void get_vsync(struct vo *vo, struct vo_vsync_info *info)
     present_sync_get_info(x11->present, info);
 }
 
-static void draw_frame(struct vo *vo, struct vo_frame *frame)
+static void draw_image(struct vo *vo, struct mp_image *mpi)
 {
     struct priv *p = vo->priv;
-    struct mp_image *mpi = frame->current;
 
-    if (mpi && mpi->imgfmt != IMGFMT_VAAPI) {
+    if (mpi->imgfmt != IMGFMT_VAAPI) {
         struct mp_image *dst = p->swdec_surfaces[p->output_surface];
         if (!dst || va_surface_upload(p, dst, mpi) < 0) {
             MP_WARN(vo, "Could not upload surface.\n");
+            talloc_free(mpi);
             return;
         }
         mp_image_copy_attributes(dst, mpi);
-        mpi = dst;
+        talloc_free(mpi);
+        mpi = mp_image_new_ref(dst);
     }
 
+    talloc_free(p->output_surfaces[p->output_surface]);
     p->output_surfaces[p->output_surface] = mpi;
 
     draw_osd(vo);
@@ -674,6 +684,10 @@ static void draw_osd(struct vo *vo)
         int rw = mp_rect_w(*rc);
         int rh = mp_rect_h(*rc);
 
+        // reduce width of last slice to prevent overflow
+        if (n == num_mod_rc - 1)
+            rw = w - rc->x0;
+
         void *src = mp_image_pixel_ptr(osd, 0, rc->x0, rc->y0);
         void *dst = vaimg.planes[0] + rc->y0 * vaimg.stride[0] + rc->x0 * 4;
 
@@ -705,6 +719,10 @@ static int control(struct vo *vo, uint32_t request, void *data)
     struct priv *p = vo->priv;
 
     switch (request) {
+    case VOCTRL_REDRAW_FRAME:
+        p->output_surface = p->visible_surface;
+        draw_osd(vo);
+        return true;
     case VOCTRL_SET_PANSCAN:
         resize(p);
         return VO_TRUE;
@@ -844,7 +862,7 @@ const struct vo_driver video_out_vaapi = {
     .query_format = query_format,
     .reconfig = reconfig,
     .control = control,
-    .draw_frame = draw_frame,
+    .draw_image = draw_image,
     .flip_page = flip_page,
     .get_vsync = get_vsync,
     .wakeup = vo_x11_wakeup,

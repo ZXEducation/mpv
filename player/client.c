@@ -13,14 +13,14 @@
  * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  */
 
-#include <assert.h>
-#include <errno.h>
-#include <fcntl.h>
-#include <math.h>
-#include <stdatomic.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <stdlib.h>
+#include <unistd.h>
+#include <fcntl.h>
+#include <errno.h>
+#include <math.h>
+#include <assert.h>
 
 #include "common/common.h"
 #include "common/global.h"
@@ -39,6 +39,7 @@
 #include "options/m_property.h"
 #include "options/path.h"
 #include "options/parse_configfile.h"
+#include "osdep/atomic.h"
 #include "osdep/threads.h"
 #include "osdep/timer.h"
 #include "osdep/io.h"
@@ -63,7 +64,7 @@
 struct mp_client_api {
     struct MPContext *mpctx;
 
-    mp_mutex lock;
+    pthread_mutex_t lock;
 
     // -- protected by lock
 
@@ -117,10 +118,10 @@ struct mpv_handle {
     struct mpv_event_property cur_property_event;
     struct observe_property *cur_property;
 
-    mp_mutex lock;
+    pthread_mutex_t lock;
 
-    mp_mutex wakeup_lock;
-    mp_cond wakeup;
+    pthread_mutex_t wakeup_lock;
+    pthread_cond_t wakeup;
 
     // -- protected by wakeup_lock
     bool need_wakeup;
@@ -184,7 +185,7 @@ void mp_clients_init(struct MPContext *mpctx)
         .mpctx = mpctx,
     };
     mpctx->global->client_api = mpctx->clients;
-    mp_mutex_init(&mpctx->clients->lock);
+    pthread_mutex_init(&mpctx->clients->lock, NULL);
 }
 
 void mp_clients_destroy(struct MPContext *mpctx)
@@ -200,7 +201,7 @@ void mp_clients_destroy(struct MPContext *mpctx)
         abort();
     }
 
-    mp_mutex_destroy(&mpctx->clients->lock);
+    pthread_mutex_destroy(&mpctx->clients->lock);
     talloc_free(mpctx->clients);
     mpctx->clients = NULL;
 }
@@ -210,14 +211,14 @@ void mp_clients_destroy(struct MPContext *mpctx)
 bool mp_clients_all_initialized(struct MPContext *mpctx)
 {
     bool all_ok = true;
-    mp_mutex_lock(&mpctx->clients->lock);
+    pthread_mutex_lock(&mpctx->clients->lock);
     for (int n = 0; n < mpctx->clients->num_clients; n++) {
         struct mpv_handle *ctx = mpctx->clients->clients[n];
-        mp_mutex_lock(&ctx->lock);
+        pthread_mutex_lock(&ctx->lock);
         all_ok &= ctx->fuzzy_initialized;
-        mp_mutex_unlock(&ctx->lock);
+        pthread_mutex_unlock(&ctx->lock);
     }
-    mp_mutex_unlock(&mpctx->clients->lock);
+    pthread_mutex_unlock(&mpctx->clients->lock);
     return all_ok;
 }
 
@@ -252,15 +253,15 @@ static struct mpv_handle *find_client(struct mp_client_api *clients,
 
 bool mp_client_id_exists(struct MPContext *mpctx, int64_t id)
 {
-    mp_mutex_lock(&mpctx->clients->lock);
+    pthread_mutex_lock(&mpctx->clients->lock);
     bool r = find_client_id(mpctx->clients, id);
-    mp_mutex_unlock(&mpctx->clients->lock);
+    pthread_mutex_unlock(&mpctx->clients->lock);
     return r;
 }
 
 struct mpv_handle *mp_new_client(struct mp_client_api *clients, const char *name)
 {
-    mp_mutex_lock(&clients->lock);
+    pthread_mutex_lock(&clients->lock);
 
     char nname[MAX_CLIENT_NAME];
     for (int n = 1; n < 1000; n++) {
@@ -277,7 +278,7 @@ struct mpv_handle *mp_new_client(struct mp_client_api *clients, const char *name
     }
 
     if (!nname[0] || clients->shutting_down) {
-        mp_mutex_unlock(&clients->lock);
+        pthread_mutex_unlock(&clients->lock);
         return NULL;
     }
 
@@ -295,9 +296,9 @@ struct mpv_handle *mp_new_client(struct mp_client_api *clients, const char *name
         .event_mask = (1ULL << INTERNAL_EVENT_BASE) - 1, // exclude internal events
         .wakeup_pipe = {-1, -1},
     };
-    mp_mutex_init(&client->lock);
-    mp_mutex_init(&client->wakeup_lock);
-    mp_cond_init(&client->wakeup);
+    pthread_mutex_init(&client->lock, NULL);
+    pthread_mutex_init(&client->wakeup_lock, NULL);
+    pthread_cond_init(&client->wakeup, NULL);
 
     snprintf(client->name, sizeof(client->name), "%s", nname);
 
@@ -307,7 +308,7 @@ struct mpv_handle *mp_new_client(struct mp_client_api *clients, const char *name
     if (clients->num_clients == 1 && !clients->mpctx->is_cli)
         client->fuzzy_initialized = true;
 
-    mp_mutex_unlock(&clients->lock);
+    pthread_mutex_unlock(&clients->lock);
 
     mpv_request_event(client, MPV_EVENT_TICK, 0);
 
@@ -316,9 +317,9 @@ struct mpv_handle *mp_new_client(struct mp_client_api *clients, const char *name
 
 void mp_client_set_weak(struct mpv_handle *ctx)
 {
-    mp_mutex_lock(&ctx->lock);
+    pthread_mutex_lock(&ctx->lock);
     ctx->is_weak = true;
-    mp_mutex_unlock(&ctx->lock);
+    pthread_mutex_unlock(&ctx->lock);
 }
 
 const char *mpv_client_name(mpv_handle *ctx)
@@ -343,41 +344,43 @@ struct mpv_global *mp_client_get_global(struct mpv_handle *ctx)
 
 static void wakeup_client(struct mpv_handle *ctx)
 {
-    mp_mutex_lock(&ctx->wakeup_lock);
+    pthread_mutex_lock(&ctx->wakeup_lock);
     if (!ctx->need_wakeup) {
         ctx->need_wakeup = true;
-        mp_cond_broadcast(&ctx->wakeup);
+        pthread_cond_broadcast(&ctx->wakeup);
         if (ctx->wakeup_cb)
             ctx->wakeup_cb(ctx->wakeup_cb_ctx);
         if (ctx->wakeup_pipe[0] != -1)
             (void)write(ctx->wakeup_pipe[1], &(char){0}, 1);
     }
-    mp_mutex_unlock(&ctx->wakeup_lock);
+    pthread_mutex_unlock(&ctx->wakeup_lock);
 }
 
 // Note: the caller has to deal with sporadic wakeups.
 static int wait_wakeup(struct mpv_handle *ctx, int64_t end)
 {
     int r = 0;
-    mp_mutex_unlock(&ctx->lock);
-    mp_mutex_lock(&ctx->wakeup_lock);
-    if (!ctx->need_wakeup)
-        r = mp_cond_timedwait_until(&ctx->wakeup, &ctx->wakeup_lock, end);
+    pthread_mutex_unlock(&ctx->lock);
+    pthread_mutex_lock(&ctx->wakeup_lock);
+    if (!ctx->need_wakeup) {
+        struct timespec ts = mp_time_us_to_timespec(end);
+        r = pthread_cond_timedwait(&ctx->wakeup, &ctx->wakeup_lock, &ts);
+    }
     if (r == 0)
         ctx->need_wakeup = false;
-    mp_mutex_unlock(&ctx->wakeup_lock);
-    mp_mutex_lock(&ctx->lock);
+    pthread_mutex_unlock(&ctx->wakeup_lock);
+    pthread_mutex_lock(&ctx->lock);
     return r;
 }
 
 void mpv_set_wakeup_callback(mpv_handle *ctx, void (*cb)(void *d), void *d)
 {
-    mp_mutex_lock(&ctx->wakeup_lock);
+    pthread_mutex_lock(&ctx->wakeup_lock);
     ctx->wakeup_cb = cb;
     ctx->wakeup_cb_ctx = d;
     if (ctx->wakeup_cb)
         ctx->wakeup_cb(ctx->wakeup_cb_ctx);
-    mp_mutex_unlock(&ctx->wakeup_lock);
+    pthread_mutex_unlock(&ctx->wakeup_lock);
 }
 
 static void lock_core(mpv_handle *ctx)
@@ -392,10 +395,10 @@ static void unlock_core(mpv_handle *ctx)
 
 void mpv_wait_async_requests(mpv_handle *ctx)
 {
-    mp_mutex_lock(&ctx->lock);
+    pthread_mutex_lock(&ctx->lock);
     while (ctx->reserved_events || ctx->async_counter)
         wait_wakeup(ctx, INT64_MAX);
-    mp_mutex_unlock(&ctx->lock);
+    pthread_mutex_unlock(&ctx->lock);
 }
 
 // Send abort signal to all matching work items.
@@ -404,7 +407,7 @@ void mpv_wait_async_requests(mpv_handle *ctx)
 static void abort_async(struct MPContext *mpctx, mpv_handle *ctx,
                         int type, uint64_t id)
 {
-    mp_mutex_lock(&mpctx->abort_lock);
+    pthread_mutex_lock(&mpctx->abort_lock);
 
     // Destroy all => ensure any newly appearing work is aborted immediately.
     if (ctx == NULL)
@@ -419,7 +422,12 @@ static void abort_async(struct MPContext *mpctx, mpv_handle *ctx,
         }
     }
 
-    mp_mutex_unlock(&mpctx->abort_lock);
+    pthread_mutex_unlock(&mpctx->abort_lock);
+}
+
+static void get_thread(void *ptr)
+{
+    *(pthread_t *)ptr = pthread_self();
 }
 
 static void mp_destroy_client(mpv_handle *ctx, bool terminate)
@@ -435,7 +443,7 @@ static void mp_destroy_client(mpv_handle *ctx, bool terminate)
     if (terminate)
         mpv_command(ctx, (const char*[]){"quit", NULL});
 
-    mp_mutex_lock(&ctx->lock);
+    pthread_mutex_lock(&ctx->lock);
 
     ctx->destroying = true;
 
@@ -447,7 +455,7 @@ static void mp_destroy_client(mpv_handle *ctx, bool terminate)
     prop_unref(ctx->cur_property);
     ctx->cur_property = NULL;
 
-    mp_mutex_unlock(&ctx->lock);
+    pthread_mutex_unlock(&ctx->lock);
 
     abort_async(mpctx, ctx, 0, 0);
 
@@ -459,7 +467,7 @@ static void mp_destroy_client(mpv_handle *ctx, bool terminate)
     osd_set_external_remove_owner(mpctx->osd, ctx);
     mp_input_remove_sections_by_owner(mpctx->input, ctx->name);
 
-    mp_mutex_lock(&clients->lock);
+    pthread_mutex_lock(&clients->lock);
 
     for (int n = 0; n < clients->num_clients; n++) {
         if (clients->clients[n] == ctx) {
@@ -471,9 +479,9 @@ static void mp_destroy_client(mpv_handle *ctx, bool terminate)
                 ctx->num_events--;
             }
             mp_msg_log_buffer_destroy(ctx->messages);
-            mp_cond_destroy(&ctx->wakeup);
-            mp_mutex_destroy(&ctx->wakeup_lock);
-            mp_mutex_destroy(&ctx->lock);
+            pthread_cond_destroy(&ctx->wakeup);
+            pthread_mutex_destroy(&ctx->wakeup_lock);
+            pthread_mutex_destroy(&ctx->lock);
             if (ctx->wakeup_pipe[0] != -1) {
                 close(ctx->wakeup_pipe[0]);
                 close(ctx->wakeup_pipe[1]);
@@ -505,7 +513,7 @@ static void mp_destroy_client(mpv_handle *ctx, bool terminate)
     // mp_hook_test_completion() also relies on this a bit.
     mp_wakeup_core(mpctx);
 
-    mp_mutex_unlock(&clients->lock);
+    pthread_mutex_unlock(&clients->lock);
 
     // Note that even if num_clients==0, having set have_terminator keeps mpctx
     // and the core thread alive.
@@ -516,14 +524,17 @@ static void mp_destroy_client(mpv_handle *ctx, bool terminate)
         mpctx->stop_play = PT_QUIT;
         mp_dispatch_unlock(mpctx->dispatch);
 
+        pthread_t playthread;
+        mp_dispatch_run(mpctx->dispatch, get_thread, &playthread);
+
         // Ask the core thread to stop.
-        mp_mutex_lock(&clients->lock);
+        pthread_mutex_lock(&clients->lock);
         clients->terminate_core_thread = true;
-        mp_mutex_unlock(&clients->lock);
+        pthread_mutex_unlock(&clients->lock);
         mp_wakeup_core(mpctx);
 
         // Blocking wait for all clients and core thread to terminate.
-        mp_thread_join(mpctx->core_thread);
+        pthread_join(playthread, NULL);
 
         mp_destroy(mpctx);
     }
@@ -548,7 +559,7 @@ void mp_shutdown_clients(struct MPContext *mpctx)
     // Forcefully abort async work after 2 seconds of waiting.
     double abort_time = mp_time_sec() + 2;
 
-    mp_mutex_lock(&clients->lock);
+    pthread_mutex_lock(&clients->lock);
 
     // Prevent that new clients can appear.
     clients->shutting_down = true;
@@ -557,7 +568,7 @@ void mp_shutdown_clients(struct MPContext *mpctx)
     while (clients->num_clients || mpctx->outstanding_async ||
            !(mpctx->is_cli || clients->terminate_core_thread))
     {
-        mp_mutex_unlock(&clients->lock);
+        pthread_mutex_unlock(&clients->lock);
 
         double left = abort_time - mp_time_sec();
         if (left >= 0) {
@@ -572,26 +583,26 @@ void mp_shutdown_clients(struct MPContext *mpctx)
         mp_client_broadcast_event(mpctx, MPV_EVENT_SHUTDOWN, NULL);
         mp_wait_events(mpctx);
 
-        mp_mutex_lock(&clients->lock);
+        pthread_mutex_lock(&clients->lock);
     }
 
-    mp_mutex_unlock(&clients->lock);
+    pthread_mutex_unlock(&clients->lock);
 }
 
 bool mp_is_shutting_down(struct MPContext *mpctx)
 {
     struct mp_client_api *clients = mpctx->clients;
-    mp_mutex_lock(&clients->lock);
+    pthread_mutex_lock(&clients->lock);
     bool res = clients->shutting_down;
-    mp_mutex_unlock(&clients->lock);
+    pthread_mutex_unlock(&clients->lock);
     return res;
 }
 
-static MP_THREAD_VOID core_thread(void *p)
+static void *core_thread(void *p)
 {
     struct MPContext *mpctx = p;
 
-    mp_thread_set_name("core");
+    mpthread_set_name("mpv core");
 
     while (!mpctx->initialized && mpctx->stop_play != PT_QUIT)
         mp_idle(mpctx);
@@ -604,7 +615,7 @@ static MP_THREAD_VOID core_thread(void *p)
     // the last mpv_handle.
     mp_shutdown_clients(mpctx);
 
-    MP_THREAD_RETURN();
+    return NULL;
 }
 
 mpv_handle *mpv_create(void)
@@ -621,7 +632,8 @@ mpv_handle *mpv_create(void)
         return NULL;
     }
 
-    if (mp_thread_create(&mpctx->core_thread, core_thread, mpctx) != 0) {
+    pthread_t thread;
+    if (pthread_create(&thread, NULL, core_thread, mpctx) != 0) {
         ctx->clients->have_terminator = true; // avoid blocking
         mpv_terminate_destroy(ctx);
         mp_destroy(mpctx);
@@ -649,23 +661,13 @@ mpv_handle *mpv_create_weak_client(mpv_handle *ctx, const char *name)
     return new;
 }
 
-#ifdef FUZZING_BUILD_MODE_UNSAFE_FOR_PRODUCTION
-int mpv_initialize_opts(mpv_handle *ctx, char **options);
-#else
-static
-#endif
-int mpv_initialize_opts(mpv_handle *ctx, char **options)
+int mpv_initialize(mpv_handle *ctx)
 {
     lock_core(ctx);
-    int res = mp_initialize(ctx->mpctx, options) ? MPV_ERROR_INVALID_PARAMETER : 0;
+    int res = mp_initialize(ctx->mpctx, NULL) ? MPV_ERROR_INVALID_PARAMETER : 0;
     mp_wakeup_core(ctx->mpctx);
     unlock_core(ctx);
     return res;
-}
-
-int mpv_initialize(mpv_handle *ctx)
-{
-    return mpv_initialize_opts(ctx, NULL);
 }
 
 // set ev->data to a new copy of the original data
@@ -704,13 +706,13 @@ static void dup_event_data(struct mpv_event *ev)
 static int reserve_reply(struct mpv_handle *ctx)
 {
     int res = MPV_ERROR_EVENT_QUEUE_FULL;
-    mp_mutex_lock(&ctx->lock);
+    pthread_mutex_lock(&ctx->lock);
     if (ctx->reserved_events + ctx->num_events < ctx->max_events && !ctx->choked)
     {
         ctx->reserved_events++;
         res = 0;
     }
-    mp_mutex_unlock(&ctx->lock);
+    pthread_mutex_unlock(&ctx->lock);
     return res;
 }
 
@@ -730,7 +732,7 @@ static int append_event(struct mpv_handle *ctx, struct mpv_event event, bool cop
 
 static int send_event(struct mpv_handle *ctx, struct mpv_event *event, bool copy)
 {
-    mp_mutex_lock(&ctx->lock);
+    pthread_mutex_lock(&ctx->lock);
     uint64_t mask = 1ULL << event->event_id;
     if (ctx->property_event_masks & mask)
         notify_property_events(ctx, event->event_id);
@@ -746,7 +748,7 @@ static int send_event(struct mpv_handle *ctx, struct mpv_event *event, bool copy
             ctx->choked = true;
         }
     }
-    mp_mutex_unlock(&ctx->lock);
+    pthread_mutex_unlock(&ctx->lock);
     return r;
 }
 
@@ -756,20 +758,20 @@ static void send_reply(struct mpv_handle *ctx, uint64_t userdata,
                        struct mpv_event *event)
 {
     event->reply_userdata = userdata;
-    mp_mutex_lock(&ctx->lock);
+    pthread_mutex_lock(&ctx->lock);
     // If this fails, reserve_reply() probably wasn't called.
     assert(ctx->reserved_events > 0);
     ctx->reserved_events--;
     if (append_event(ctx, *event, false) < 0)
         MP_ASSERT_UNREACHABLE();
-    mp_mutex_unlock(&ctx->lock);
+    pthread_mutex_unlock(&ctx->lock);
 }
 
 void mp_client_broadcast_event(struct MPContext *mpctx, int event, void *data)
 {
     struct mp_client_api *clients = mpctx->clients;
 
-    mp_mutex_lock(&clients->lock);
+    pthread_mutex_lock(&clients->lock);
 
     for (int n = 0; n < clients->num_clients; n++) {
         struct mpv_event event_data = {
@@ -779,7 +781,7 @@ void mp_client_broadcast_event(struct MPContext *mpctx, int event, void *data)
         send_event(clients->clients[n], &event_data, true);
     }
 
-    mp_mutex_unlock(&clients->lock);
+    pthread_mutex_unlock(&clients->lock);
 }
 
 // Like mp_client_broadcast_event(), but can be called from any thread.
@@ -812,7 +814,7 @@ int mp_client_send_event(struct MPContext *mpctx, const char *client_name,
         .reply_userdata = reply_userdata,
     };
 
-    mp_mutex_lock(&clients->lock);
+    pthread_mutex_lock(&clients->lock);
 
     struct mpv_handle *ctx = find_client(clients, client_name);
     if (ctx) {
@@ -822,7 +824,7 @@ int mp_client_send_event(struct MPContext *mpctx, const char *client_name,
         talloc_free(data);
     }
 
-    mp_mutex_unlock(&clients->lock);
+    pthread_mutex_unlock(&clients->lock);
 
     return r;
 }
@@ -844,7 +846,7 @@ int mp_client_send_event_dup(struct MPContext *mpctx, const char *client_name,
     return mp_client_send_event(mpctx, client_name, 0, event, event_data.data);
 }
 
-static const bool deprecated_events[] = {
+const static bool deprecated_events[] = {
     [MPV_EVENT_IDLE] = true,
     [MPV_EVENT_TICK] = true,
 };
@@ -856,7 +858,7 @@ int mpv_request_event(mpv_handle *ctx, mpv_event_id event, int enable)
     if (event == MPV_EVENT_SHUTDOWN && !enable)
         return MPV_ERROR_INVALID_PARAMETER;
     assert(event < (int)INTERNAL_EVENT_BASE); // excluded above; they have no name
-    mp_mutex_lock(&ctx->lock);
+    pthread_mutex_lock(&ctx->lock);
     uint64_t bit = 1ULL << event;
     ctx->event_mask = enable ? ctx->event_mask | bit : ctx->event_mask & ~bit;
     if (enable && event < MP_ARRAY_SIZE(deprecated_events) &&
@@ -865,7 +867,7 @@ int mpv_request_event(mpv_handle *ctx, mpv_event_id event, int enable)
         MP_WARN(ctx, "The '%s' event is deprecated and will be removed.\n",
                 mpv_event_name(event));
     }
-    mp_mutex_unlock(&ctx->lock);
+    pthread_mutex_unlock(&ctx->lock);
     return 0;
 }
 
@@ -894,7 +896,7 @@ mpv_event *mpv_wait_event(mpv_handle *ctx, double timeout)
 {
     mpv_event *event = ctx->cur_event;
 
-    mp_mutex_lock(&ctx->lock);
+    pthread_mutex_lock(&ctx->lock);
 
     if (!ctx->fuzzy_initialized)
         mp_wakeup_core(ctx->clients->mpctx);
@@ -903,7 +905,7 @@ mpv_event *mpv_wait_event(mpv_handle *ctx, double timeout)
     if (timeout < 0)
         timeout = 1e20;
 
-    int64_t deadline = mp_time_ns_add(mp_time_ns(), timeout);
+    int64_t deadline = mp_add_timeout(mp_time_us(), timeout);
 
     *event = (mpv_event){0};
     talloc_free_children(event);
@@ -952,17 +954,17 @@ mpv_event *mpv_wait_event(mpv_handle *ctx, double timeout)
     }
     ctx->queued_wakeup = false;
 
-    mp_mutex_unlock(&ctx->lock);
+    pthread_mutex_unlock(&ctx->lock);
 
     return event;
 }
 
 void mpv_wakeup(mpv_handle *ctx)
 {
-    mp_mutex_lock(&ctx->lock);
+    pthread_mutex_lock(&ctx->lock);
     ctx->queued_wakeup = true;
     wakeup_client(ctx);
-    mp_mutex_unlock(&ctx->lock);
+    pthread_mutex_unlock(&ctx->lock);
 }
 
 // map client API types to internal types
@@ -1400,7 +1402,7 @@ static void getproperty_fn(void *arg)
     struct getproperty_request *req = arg;
     const struct m_option *type = get_mp_type_get(req->format);
 
-    union m_option_value xdata = m_option_value_default;
+    union m_option_value xdata = {0};
     void *data = req->data ? req->data : &xdata;
 
     int err = -1;
@@ -1544,7 +1546,7 @@ int mpv_observe_property(mpv_handle *ctx, uint64_t userdata,
     if (format == MPV_FORMAT_OSD_STRING)
         return MPV_ERROR_PROPERTY_FORMAT;
 
-    mp_mutex_lock(&ctx->lock);
+    pthread_mutex_lock(&ctx->lock);
     assert(!ctx->destroying);
     struct observe_property *prop = talloc_ptrtype(ctx, prop);
     talloc_set_destructor(prop, property_free);
@@ -1558,8 +1560,6 @@ int mpv_observe_property(mpv_handle *ctx, uint64_t userdata,
         .type = type,
         .change_ts = 1, // force initial event
         .refcount = 1,
-        .value = m_option_value_default,
-        .value_ret = m_option_value_default,
     };
     ctx->properties_change_ts += 1;
     MP_TARRAY_APPEND(ctx, ctx->properties, ctx->num_properties, prop);
@@ -1567,14 +1567,14 @@ int mpv_observe_property(mpv_handle *ctx, uint64_t userdata,
     ctx->new_property_events = true;
     ctx->cur_property_index = 0;
     ctx->has_pending_properties = true;
-    mp_mutex_unlock(&ctx->lock);
+    pthread_mutex_unlock(&ctx->lock);
     mp_wakeup_core(ctx->mpctx);
     return 0;
 }
 
 int mpv_unobserve_property(mpv_handle *ctx, uint64_t userdata)
 {
-    mp_mutex_lock(&ctx->lock);
+    pthread_mutex_lock(&ctx->lock);
     int count = 0;
     for (int n = ctx->num_properties - 1; n >= 0; n--) {
         struct observe_property *prop = ctx->properties[n];
@@ -1588,7 +1588,7 @@ int mpv_unobserve_property(mpv_handle *ctx, uint64_t userdata)
             count++;
         }
     }
-    mp_mutex_unlock(&ctx->lock);
+    pthread_mutex_unlock(&ctx->lock);
     return count;
 }
 
@@ -1623,11 +1623,11 @@ void mp_client_property_change(struct MPContext *mpctx, const char *name)
     int id = mp_get_property_id(mpctx, name);
     bool any_pending = false;
 
-    mp_mutex_lock(&clients->lock);
+    pthread_mutex_lock(&clients->lock);
 
     for (int n = 0; n < clients->num_clients; n++) {
         struct mpv_handle *client = clients->clients[n];
-        mp_mutex_lock(&client->lock);
+        pthread_mutex_lock(&client->lock);
         for (int i = 0; i < client->num_properties; i++) {
             if (client->properties[i]->id == id &&
                 property_shared_prefix(name, client->properties[i]->name)) {
@@ -1636,10 +1636,10 @@ void mp_client_property_change(struct MPContext *mpctx, const char *name)
                 any_pending = true;
             }
         }
-        mp_mutex_unlock(&client->lock);
+        pthread_mutex_unlock(&client->lock);
     }
 
-    mp_mutex_unlock(&clients->lock);
+    pthread_mutex_unlock(&clients->lock);
 
     // If we're inside mp_dispatch_queue_process(), this will cause the playloop
     // to be re-run (to get mp_client_send_property_changes() called). If we're
@@ -1682,7 +1682,7 @@ static void send_client_property_changes(struct mpv_handle *ctx)
         bool changed = false;
         if (prop->format) {
             const struct m_option *type = prop->type;
-            union m_option_value val = m_option_value_default;
+            union m_option_value val = {0};
             struct getproperty_request req = {
                 .mpctx = ctx->mpctx,
                 .name = prop->name,
@@ -1696,9 +1696,9 @@ static void send_client_property_changes(struct mpv_handle *ctx)
             // or similar things are involved).
             prop->refcount += 1; // keep prop alive (esp. prop->name)
             ctx->async_counter += 1; // keep ctx alive
-            mp_mutex_unlock(&ctx->lock);
+            pthread_mutex_unlock(&ctx->lock);
             getproperty_fn(&req);
-            mp_mutex_lock(&ctx->lock);
+            pthread_mutex_lock(&ctx->lock);
             ctx->async_counter -= 1;
             prop_unref(prop);
 
@@ -1755,22 +1755,22 @@ void mp_client_send_property_changes(struct MPContext *mpctx)
 {
     struct mp_client_api *clients = mpctx->clients;
 
-    mp_mutex_lock(&clients->lock);
+    pthread_mutex_lock(&clients->lock);
     uint64_t cur_ts = clients->clients_list_change_ts;
 
     for (int n = 0; n < clients->num_clients; n++) {
         struct mpv_handle *ctx = clients->clients[n];
 
-        mp_mutex_lock(&ctx->lock);
+        pthread_mutex_lock(&ctx->lock);
         if (!ctx->has_pending_properties || ctx->destroying) {
-            mp_mutex_unlock(&ctx->lock);
+            pthread_mutex_unlock(&ctx->lock);
             continue;
         }
         // Keep ctx->lock locked (unlock order does not matter).
-        mp_mutex_unlock(&clients->lock);
+        pthread_mutex_unlock(&clients->lock);
         send_client_property_changes(ctx);
-        mp_mutex_unlock(&ctx->lock);
-        mp_mutex_lock(&clients->lock);
+        pthread_mutex_unlock(&ctx->lock);
+        pthread_mutex_lock(&clients->lock);
         if (cur_ts != clients->clients_list_change_ts) {
             // List changed; need to start over. Do it in the next iteration.
             mp_wakeup_core(mpctx);
@@ -1778,7 +1778,7 @@ void mp_client_send_property_changes(struct MPContext *mpctx)
         }
     }
 
-    mp_mutex_unlock(&clients->lock);
+    pthread_mutex_unlock(&clients->lock);
 }
 
 // Set ctx->cur_event to a generated property change event, if there is any
@@ -1885,7 +1885,7 @@ int mpv_request_log_messages(mpv_handle *ctx, const char *min_level)
     if (level < 0 && strcmp(min_level, "no") != 0)
         return MPV_ERROR_INVALID_PARAMETER;
 
-    mp_mutex_lock(&ctx->lock);
+    pthread_mutex_lock(&ctx->lock);
     if (level < 0 || level != ctx->messages_level) {
         mp_msg_log_buffer_destroy(ctx->messages);
         ctx->messages = NULL;
@@ -1900,7 +1900,7 @@ int mpv_request_log_messages(mpv_handle *ctx, const char *min_level)
         mp_msg_log_buffer_set_silent(ctx->messages, silent);
     }
     wakeup_client(ctx);
-    mp_mutex_unlock(&ctx->lock);
+    pthread_mutex_unlock(&ctx->lock);
     return 0;
 }
 
@@ -1932,13 +1932,13 @@ static bool gen_log_message_event(struct mpv_handle *ctx)
 
 int mpv_get_wakeup_pipe(mpv_handle *ctx)
 {
-    mp_mutex_lock(&ctx->wakeup_lock);
+    pthread_mutex_lock(&ctx->wakeup_lock);
     if (ctx->wakeup_pipe[0] == -1) {
         if (mp_make_wakeup_pipe(ctx->wakeup_pipe) >= 0)
             (void)write(ctx->wakeup_pipe[1], &(char){0}, 1);
     }
     int fd = ctx->wakeup_pipe[0];
-    mp_mutex_unlock(&ctx->wakeup_lock);
+    pthread_mutex_unlock(&ctx->wakeup_lock);
     return fd;
 }
 
@@ -2064,7 +2064,7 @@ static const char *const err_table[] = {
     [-MPV_ERROR_SUCCESS] = "success",
     [-MPV_ERROR_EVENT_QUEUE_FULL] = "event queue full",
     [-MPV_ERROR_NOMEM] = "memory allocation failed",
-    [-MPV_ERROR_UNINITIALIZED] = "core not initialized",
+    [-MPV_ERROR_UNINITIALIZED] = "core not uninitialized",
     [-MPV_ERROR_INVALID_PARAMETER] = "invalid parameter",
     [-MPV_ERROR_OPTION_NOT_FOUND] = "option not found",
     [-MPV_ERROR_OPTION_FORMAT] = "unsupported format for accessing option",
@@ -2129,14 +2129,9 @@ void mpv_free(void *data)
     talloc_free(data);
 }
 
-int64_t mpv_get_time_ns(mpv_handle *ctx)
-{
-    return mp_time_ns();
-}
-
 int64_t mpv_get_time_us(mpv_handle *ctx)
 {
-    return mp_time_ns() / 1000;
+    return mp_time_us();
 }
 
 #include "video/out/libmpv.h"
@@ -2166,14 +2161,14 @@ bool mp_set_main_render_context(struct mp_client_api *client_api,
 {
     assert(ctx);
 
-    mp_mutex_lock(&client_api->lock);
+    pthread_mutex_lock(&client_api->lock);
     bool is_set = !!client_api->render_context;
     bool is_same = client_api->render_context == ctx;
     // Can set if it doesn't remove another existing ctx.
     bool res = is_same || !is_set;
     if (res)
         client_api->render_context = active ? ctx : NULL;
-    mp_mutex_unlock(&client_api->lock);
+    pthread_mutex_unlock(&client_api->lock);
     return res;
 }
 
@@ -2182,10 +2177,10 @@ struct mpv_render_context *
 mp_client_api_acquire_render_context(struct mp_client_api *ca)
 {
     struct mpv_render_context *res = NULL;
-    mp_mutex_lock(&ca->lock);
+    pthread_mutex_lock(&ca->lock);
     if (ca->render_context && mp_render_context_acquire(ca->render_context))
         res = ca->render_context;
-    mp_mutex_unlock(&ca->lock);
+    pthread_mutex_unlock(&ca->lock);
     return res;
 }
 
@@ -2205,7 +2200,7 @@ int mpv_stream_cb_add_ro(mpv_handle *ctx, const char *protocol, void *user_data,
 
     struct mp_client_api *clients = ctx->clients;
     int r = 0;
-    mp_mutex_lock(&clients->lock);
+    pthread_mutex_lock(&clients->lock);
     for (int n = 0; n < clients->num_custom_protocols; n++) {
         struct mp_custom_protocol *proto = &clients->custom_protocols[n];
         if (strcmp(proto->protocol, protocol) == 0) {
@@ -2224,7 +2219,7 @@ int mpv_stream_cb_add_ro(mpv_handle *ctx, const char *protocol, void *user_data,
         MP_TARRAY_APPEND(clients, clients->custom_protocols,
                          clients->num_custom_protocols, proto);
     }
-    mp_mutex_unlock(&clients->lock);
+    pthread_mutex_unlock(&clients->lock);
     return r;
 }
 
@@ -2233,7 +2228,7 @@ bool mp_streamcb_lookup(struct mpv_global *g, const char *protocol,
 {
     struct mp_client_api *clients = g->client_api;
     bool found = false;
-    mp_mutex_lock(&clients->lock);
+    pthread_mutex_lock(&clients->lock);
     for (int n = 0; n < clients->num_custom_protocols; n++) {
         struct mp_custom_protocol *proto = &clients->custom_protocols[n];
         if (strcmp(proto->protocol, protocol) == 0) {
@@ -2243,6 +2238,6 @@ bool mp_streamcb_lookup(struct mpv_global *g, const char *protocol,
             break;
         }
     }
-    mp_mutex_unlock(&clients->lock);
+    pthread_mutex_unlock(&clients->lock);
     return found;
 }

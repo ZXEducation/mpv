@@ -32,18 +32,6 @@ API changes
 
 ::
 
- --- mpv 0.39.0 ---
- 2.4    - mpv_render_param with the MPV_RENDER_PARAM_ICC_PROFILE argument no
-          longer has incorrect assumptions about memory allocation and can be
-          correctly used.
- --- mpv 0.38.0 ---
- 2.3    - partially revert the changes from API version 1.27, remove libmpv as
-          the default VO and move it to the bottom of the auto-probing order.
-          This restores the prior behavior on all platforms other than macOS,
-          but still auto selects libmpv/cocoa-cb on macOS if it was built with
-          support for cocoa-cb.
- --- mpv 0.37.0 ---
- 2.2    - add mpv_time_ns()
  --- mpv 0.36.0 ---
  2.1    - add mpv_del_property()
  --- mpv 0.35.0 ---
@@ -283,7 +271,7 @@ API changes
         - extend the "--start" option; a leading "+", which was previously
           insignificant is now significant
         - add "cache-free" and "cache-used" properties
-        - macOS: the "coreaudio" AO spdif code is split into a separate AO
+        - OSX: the "coreaudio" AO spdif code is split into a separate AO
  --- mpv 0.4.0 ---
  1.0    - the API is declared stable
 
