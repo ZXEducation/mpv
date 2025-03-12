@@ -1714,7 +1714,7 @@ major = client_h_define.split('|')[0].split('<<')[0].strip('() ')
 minor = client_h_define.split('|')[1].strip('() ')
 client_api_version = major + '.' + minor + '.0'
 
-libmpv = library('mpv', sources, dependencies: dependencies, vs_module_defs:'libmpv.def',
+libmpv = library('mpv', sources, dependencies: dependencies, vs_module_defs:'libmpv.def', gnu_symbol_visibility: 'hidden',
                  version: client_api_version, include_directories: includedir,
                  install: get_option('libmpv'), build_by_default: get_option('libmpv'))
 
