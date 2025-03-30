@@ -1295,7 +1295,7 @@ static int receive_frame(struct mp_filter *vd, struct mp_frame *out_frame) {
   }
 
   MP_INFO(vd, "QueueSize %d.\n", decoded_queue_size);
-  if (decoded_queue_size > 120) {
+  if (decoded_queue_size > 90) {
     can_track = true;
   } else if (decoded_queue_size < 30) {
     can_track = false;
