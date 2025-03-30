@@ -1227,6 +1227,8 @@ MPV_EXPORT void mpv_set_cartrack_process(bool (*func)(AVFrame *)) {
 }
 
 extern bool enable_cartrack; 
+int decoded_queue_size = 0;
+bool can_track = false;
 
 static int receive_frame(struct mp_filter *vd, struct mp_frame *out_frame) {
   vd_ffmpeg_ctx *ctx = vd->priv;
@@ -1288,7 +1290,14 @@ static int receive_frame(struct mp_filter *vd, struct mp_frame *out_frame) {
     }
   }
 
-  if (enable_cartrack && mpv_cartrack_process != NULL) {
+  MP_INFO(vd, "QueueSize %d.\n", decoded_queue_size);
+  if (decoded_queue_size > 60) {
+    can_track = true;
+  } else if (decoded_queue_size < 30) {
+    can_track = false;
+  }
+  decoded_queue_size++;
+  if (can_track && enable_cartrack && mpv_cartrack_process != NULL) {
       AVFrame *frame = mp_image_to_av_frame(res);
       if (frame) {
           if (mpv_cartrack_process(frame)) {

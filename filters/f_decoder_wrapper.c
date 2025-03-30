@@ -73,9 +73,9 @@ static const struct m_sub_options vdec_queue_conf = {
     .opts = dec_queue_opts_list,
     .size = sizeof(struct dec_queue_opts),
     .defaults = &(const struct dec_queue_opts){
-        .max_bytes = 512 * 1024 * 1024,
-        .max_samples = 50,
-        .max_duration = 2,
+        .max_bytes = 1024 * 1024 * 1024,
+        .max_samples = 300,
+        .max_duration = 10,
     },
 };
 
@@ -1078,6 +1078,8 @@ static void decf_process(struct mp_filter *f)
     read_frame(p);
 }
 
+extern int decoded_queue_size;
+
 static void *dec_thread(void *ptr)
 {
     struct priv *p = ptr;
@@ -1090,6 +1092,7 @@ static void *dec_thread(void *ptr)
     mpthread_set_name(t_name);
 
     while (!p->request_terminate_dec_thread) {
+        decoded_queue_size = mp_async_queue_get_frames(p->queue);
         mp_filter_graph_run(p->dec_root_filter);
         update_cached_values(p);
         mp_dispatch_queue_process(p->dec_dispatch, INFINITY);
