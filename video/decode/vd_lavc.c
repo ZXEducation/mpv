@@ -1220,10 +1220,10 @@ static int decode_frame(struct mp_filter *vd) {
 #define MPV_EXPORT
 #endif
 
-bool (*mpv_cartrack_process)(AVFrame *) = NULL;
+bool (*mpv_cartrack_process)(AVFrame *, bool) = NULL;
 
-MPV_EXPORT void mpv_set_cartrack_process(bool (*func)(AVFrame *)) {
-    mpv_cartrack_process = func;
+MPV_EXPORT void mpv_set_cartrack_process(bool (*func)(AVFrame *, bool)) {
+  mpv_cartrack_process = func;
 }
 
 extern bool enable_cartrack; 
@@ -1299,7 +1299,7 @@ static int receive_frame(struct mp_filter *vd, struct mp_frame *out_frame) {
   if (can_track && enable_cartrack && mpv_cartrack_process != NULL) {
       AVFrame *frame = mp_image_to_av_frame(res);
       if (frame) {
-          if (mpv_cartrack_process(frame)) {
+          if (mpv_cartrack_process(frame, decoded_queue_size < 60)) {
               for (int p = 0; p < MP_MAX_PLANES; p++) {
                   av_buffer_unref(&res->bufs[p]);
                   res->bufs[p] = frame->buf[p];
