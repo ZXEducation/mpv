@@ -1296,7 +1296,6 @@ static int receive_frame(struct mp_filter *vd, struct mp_frame *out_frame) {
   } else if (decoded_queue_size < 30) {
     can_track = false;
   }
-  decoded_queue_size++;
   if (can_track && enable_cartrack && mpv_cartrack_process != NULL) {
       AVFrame *frame = mp_image_to_av_frame(res);
       if (frame) {

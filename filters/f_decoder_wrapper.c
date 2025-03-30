@@ -1078,8 +1078,6 @@ static void decf_process(struct mp_filter *f)
     read_frame(p);
 }
 
-extern int decoded_queue_size;
-
 static void *dec_thread(void *ptr)
 {
     struct priv *p = ptr;
@@ -1092,7 +1090,6 @@ static void *dec_thread(void *ptr)
     mpthread_set_name(t_name);
 
     while (!p->request_terminate_dec_thread) {
-        decoded_queue_size = mp_async_queue_get_frames(p->queue);
         mp_filter_graph_run(p->dec_root_filter);
         update_cached_values(p);
         mp_dispatch_queue_process(p->dec_dispatch, INFINITY);

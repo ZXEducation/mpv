@@ -242,6 +242,8 @@ static void destroy(struct mp_filter *f)
     unref_queue(q);
 }
 
+extern int decoded_queue_size;
+
 static void process_in(struct mp_filter *f)
 {
     struct priv *p = f->priv;
@@ -263,6 +265,8 @@ static void process_in(struct mp_filter *f)
         struct mp_frame frame = mp_pin_out_read(f->ppins[0]);
         account_frame(q, frame, 1);
         MP_TARRAY_INSERT_AT(q, q->frames, q->num_frames, 0, frame);
+        if (frame.type == MP_FRAME_VIDEO)
+            decoded_queue_size = q->num_frames;
         // Notify reader that we have new frames.
         if (q->conn[1])
             mp_filter_wakeup(q->conn[1]);
@@ -296,6 +300,8 @@ static void process_out(struct mp_filter *f)
         q->num_frames -= 1;
         account_frame(q, frame, -1);
         assert(q->samples_size >= 0);
+        if (frame.type == MP_FRAME_VIDEO)
+            decoded_queue_size = q->num_frames;
         mp_pin_in_write(f->ppins[0], frame);
         // Notify writer that we need new frames.
         if (q->conn[0])
