@@ -793,6 +793,12 @@ static int mp_property_time_start(void *ctx, struct m_property *prop,
     return property_time(action, arg, 0);
 }
 
+void (*mpv_cartrack_clean)(void) = NULL;
+
+MPV_EXPORT void mpv_set_cartrack_clean(void (*func)(void)) {
+    mpv_cartrack_clean = func;
+}
+
 /// Current position in seconds (RW)
 static int mp_property_time_pos(void *ctx, struct m_property *prop,
                                 int action, void *arg)
@@ -802,6 +808,7 @@ static int mp_property_time_pos(void *ctx, struct m_property *prop,
         return M_PROPERTY_UNAVAILABLE;
 
     if (action == M_PROPERTY_SET) {
+        mpv_cartrack_clean();
         queue_seek(mpctx, MPSEEK_ABSOLUTE, *(double *)arg, MPSEEK_DEFAULT, 0);
         return M_PROPERTY_OK;
     }

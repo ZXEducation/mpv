@@ -1221,13 +1221,13 @@ static int decode_frame(struct mp_filter *vd) {
 #endif
 
 bool (*mpv_cartrack_process)(AVFrame *, bool) = NULL;
-void (*mpv_cartrack_clean)(void) = NULL;
+void (*mpv_cartrack_frame_increment)(void) = NULL;
 
 MPV_EXPORT void mpv_set_cartrack_process(bool (*func)(AVFrame *, bool)) {
   mpv_cartrack_process = func;
 }
-MPV_EXPORT void mpv_set_cartrack_clean(void (*func)(void)) {
-  mpv_cartrack_clean = func;
+MPV_EXPORT void mpv_set_cartrack_frame_increment(void (*func)(void)) {
+  mpv_cartrack_frame_increment = func;
 }
 
 extern bool enable_cartrack; 
@@ -1299,9 +1299,6 @@ static int receive_frame(struct mp_filter *vd, struct mp_frame *out_frame) {
     can_track = true;
   } else if (decoded_queue_size < 30) {
     can_track = false;
-    if (mpv_cartrack_clean != NULL) {
-      mpv_cartrack_clean();
-    }
   }
   if (can_track && enable_cartrack && mpv_cartrack_process != NULL) {
       AVFrame *frame = mp_image_to_av_frame(res);
@@ -1319,6 +1316,10 @@ static int receive_frame(struct mp_filter *vd, struct mp_frame *out_frame) {
               mp_image_setfmt(res, pixfmt2imgfmt(frame->format));
           }
       }
+  } else {
+    if (mpv_cartrack_frame_increment != NULL) {
+      mpv_cartrack_frame_increment();
+    }
   }
 
   if (!ctx->hwdec_notified) {
