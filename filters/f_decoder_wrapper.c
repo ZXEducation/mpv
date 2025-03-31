@@ -73,9 +73,9 @@ static const struct m_sub_options vdec_queue_conf = {
     .opts = dec_queue_opts_list,
     .size = sizeof(struct dec_queue_opts),
     .defaults = &(const struct dec_queue_opts){
-        .max_bytes = 1448 * 1024 * 1024,
-        .max_samples = 500,
-        .max_duration = 20,
+        .max_bytes = 1024 * 1024 * 1024,
+        .max_samples = 300,
+        .max_duration = 10,
     },
 };
 
