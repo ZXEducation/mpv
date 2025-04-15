@@ -22,6 +22,7 @@
 #include <math.h>
 #include <assert.h>
 #include <pthread.h>
+#include <stdatomic.h>
 
 #include <libavutil/buffer.h>
 #include <libavutil/common.h>
@@ -1164,7 +1165,7 @@ static void onlock_dec_thread(void *ptr)
     mp_filter_graph_interrupt(p->dec_root_filter);
 }
 
-extern bool enable_cartrack;
+extern atomic_bool enable_cartrack;
 
 struct mp_decoder_wrapper *mp_decoder_wrapper_create(struct mp_filter *parent,
                                                      struct sh_stream *src)
@@ -1196,7 +1197,7 @@ struct mp_decoder_wrapper *mp_decoder_wrapper_create(struct mp_filter *parent,
             MP_INFO(p, "FPS forced to %5.3f.\n", p->fps);
             MP_INFO(p, "Use --no-correct-pts to force FPS based timing.\n");
         }
-        p->opts->vdec_queue_opts->use_queue = enable_cartrack;
+        p->opts->vdec_queue_opts->use_queue = atomic_load(&enable_cartrack);
         p->queue_opts = p->opts->vdec_queue_opts;
     } else if (p->header->type == STREAM_AUDIO) {
         p->log = mp_log_new(p, parent->global->log, "!ad");

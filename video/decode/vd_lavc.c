@@ -21,6 +21,7 @@
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <stdatomic.h>
 
 #include <libavcodec/avcodec.h>
 #include <libavformat/version.h>
@@ -1230,7 +1231,7 @@ MPV_EXPORT void mpv_set_cartrack_frame_increment(void (*func)(void)) {
   mpv_cartrack_frame_increment = func;
 }
 
-extern bool enable_cartrack; 
+extern atomic_bool enable_cartrack; 
 int decoded_queue_size = 0;
 bool can_track = false;
 
@@ -1299,7 +1300,7 @@ static int receive_frame(struct mp_filter *vd, struct mp_frame *out_frame) {
   } else if (decoded_queue_size < 30) {
     can_track = false;
   }
-  if (can_track && enable_cartrack && mpv_cartrack_process != NULL) {
+  if (can_track && atomic_load(&enable_cartrack) && mpv_cartrack_process != NULL) {
       AVFrame *frame = mp_image_to_av_frame(res);
       if (frame) {
           if (mpv_cartrack_process(frame, decoded_queue_size < 60)) {

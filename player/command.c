@@ -26,6 +26,7 @@
 #include <math.h>
 #include <pthread.h>
 #include <sys/types.h>
+#include <stdatomic.h>
 
 #include <ass/ass.h>
 #include <libavutil/avstring.h>
@@ -475,18 +476,22 @@ static int mp_property_filename(void *ctx, struct m_property *prop,
     return r;
 }
 
-bool enable_cartrack = true;
+atomic_bool enable_cartrack = true;
+
+MPV_EXPORT void mpv_disable_cartrack() {
+    atomic_store(&enable_cartrack, false);
+}
 
 static int mp_property_cartrack(void *ctx, struct m_property *prop,
                                             int action, void *arg)
 {
     switch (action) {
     case M_PROPERTY_SET: {
-        enable_cartrack = *(bool *)arg;
+        atomic_store(&enable_cartrack, *(bool *)arg);
         return M_PROPERTY_OK;
     }
     }
-    return m_property_bool_ro(action, arg, enable_cartrack);;
+    return m_property_bool_ro(action, arg, atomic_load(&enable_cartrack));
 }
 
 
