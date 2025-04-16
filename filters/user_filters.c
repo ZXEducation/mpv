@@ -78,7 +78,7 @@ const struct mp_user_filter_entry *vf_list[] = {
     &vf_format,
     &vf_lavfi,
     &vf_lavfi_bridge,
-    &vf_cartrack,
+    // &vf_cartrack,
     &vf_sub,
 #if HAVE_ZIMG
     &vf_fingerprint,
