@@ -197,6 +197,7 @@ sources = files(
     'video/decode/vd_lavc.c',
     'video/filter/refqueue.c',
     'video/filter/vf_format.c',
+    'video/filter/vf_cartrack.c',
     'video/filter/vf_sub.c',
     'video/fmt-conversion.c',
     'video/hwdec.c',
